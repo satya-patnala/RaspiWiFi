@@ -50,13 +50,14 @@ def save_credentials():
         os.system('systemctl stop hostapd')
         os.system('systemctl stop dnsmasq')
         
-        # Call set_ap_client_mode() in a thread with a longer delay
-        def sleep_and_start_ap():
+        # Call transition to client mode in a thread with a longer delay
+        def sleep_and_transition():
             time.sleep(8)  # Longer delay to ensure all file operations complete
             # Remove the flag file
             os.system('rm -f /tmp/raspiwifi_configuring')
-            set_ap_client_mode()
-        t = Thread(target=sleep_and_start_ap)
+            # Use the new transition function instead of set_ap_client_mode
+            transition_to_client_mode()
+        t = Thread(target=sleep_and_transition)
         t.start()
 
         return render_template('save_credentials.html', ssid = ssid)
@@ -167,6 +168,9 @@ def create_wpa_supplicant(ssid, wifi_key):
         except:
             raise Exception("Cannot read or validate wpa_supplicant.conf")
         
+        # Immediately try to start wpa_supplicant to begin WiFi connection process
+        os.system('systemctl restart wpa_supplicant')
+        
         return True
             
     except Exception as e:
@@ -184,17 +188,33 @@ def set_ap_client_mode():
     os.system('mv /etc/dnsmasq.conf.original /etc/dnsmasq.conf')
     os.system('mv /etc/dhcpcd.conf.original /etc/dhcpcd.conf')
     
-    # Instead of rebooting, restart network services
+    # Stop AP mode services
     os.system('systemctl stop hostapd')
     os.system('systemctl stop dnsmasq')
+    os.system('systemctl disable hostapd')
+    os.system('systemctl disable dnsmasq')
+    
+    # Restart network services for client mode
     os.system('systemctl restart dhcpcd')
     
     # Restart network interface to apply new configuration
     restart_network_interface()
     
-    # Start client mode services
+    # Start and enable wpa_supplicant for WiFi client mode
     os.system('systemctl start wpa_supplicant')
     os.system('systemctl enable wpa_supplicant')
+    
+    # Wait for connection to establish
+    time.sleep(5)
+    
+    # Try to connect to the WiFi network
+    os.system('wpa_cli -i wlan0 reconfigure')
+    os.system('dhclient wlan0')
+    
+    # Optionally enable NetworkManager for GUI compatibility
+    # This allows the WiFi icon in the desktop to work properly
+    os.system('systemctl enable NetworkManager')
+    os.system('systemctl start NetworkManager')
 
 def update_wpa(wpa_enabled, wpa_key):
     with fileinput.FileInput('/etc/raspiwifi/raspiwifi.conf', inplace=True) as raspiwifi_conf:
@@ -238,9 +258,61 @@ def ensure_ap_mode_ip():
     """Ensure wlan0 has static IP 10.0.0.1 when in AP mode"""
     # Check if we're in host mode (AP mode)
     if os.path.exists('/etc/raspiwifi/host_mode'):
+        # Stop NetworkManager if it's running to avoid conflicts
+        os.system('systemctl stop NetworkManager 2>/dev/null')
+        
+        # Bring interface down and up to reset it
+        os.system('ip link set wlan0 down 2>/dev/null')
+        os.system('sleep 1')
+        os.system('ip link set wlan0 up')
+        os.system('sleep 1')
+        
         # Set static IP immediately for AP mode
-        os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0')
-        os.system('ifconfig wlan0 up')
+        os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0 up')
+        
+        # Verify it worked
+        result = os.system('ifconfig wlan0 | grep "inet 10.0.0.1" > /dev/null 2>&1')
+        if result != 0:
+            # Try alternative method if first attempt failed
+            os.system('ip addr add 10.0.0.1/24 dev wlan0 2>/dev/null')
+            os.system('ip link set wlan0 up')
+        
+        # Ensure dhcpcd is managing the interface properly
+        os.system('systemctl restart dhcpcd 2>/dev/null')
+
+def transition_to_client_mode():
+    """Properly transition from AP mode to WiFi client mode with NetworkManager support"""
+    
+    # Stop AP mode services first
+    os.system('systemctl stop hostapd')
+    os.system('systemctl stop dnsmasq') 
+    os.system('systemctl disable hostapd')
+    os.system('systemctl disable dnsmasq')
+    
+    # Remove static IP configuration for wlan0 to allow DHCP
+    os.system('ip addr flush dev wlan0')
+    
+    # Start wpa_supplicant to connect to WiFi
+    os.system('systemctl start wpa_supplicant')
+    os.system('systemctl enable wpa_supplicant')
+    
+    # Wait a moment for wpa_supplicant to start
+    time.sleep(3)
+    
+    # Trigger WiFi connection
+    os.system('wpa_cli -i wlan0 reconfigure')
+    
+    # Wait for connection attempt
+    time.sleep(5)
+    
+    # Request DHCP lease for the WiFi connection
+    os.system('dhclient wlan0')
+    
+    # Enable NetworkManager for desktop GUI compatibility
+    # This makes the WiFi icon work in the Raspberry Pi desktop
+    os.system('systemctl unmask NetworkManager')
+    os.system('systemctl enable NetworkManager')
+    os.system('systemctl start NetworkManager')
 
 
 if __name__ == '__main__':

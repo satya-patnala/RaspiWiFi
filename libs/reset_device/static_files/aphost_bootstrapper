@@ -1,11 +1,30 @@
 #!/bin/bash
 
+# Stop NetworkManager to avoid conflicts
+systemctl stop NetworkManager 2>/dev/null || true
+
+# Ensure dhcpcd is running
+systemctl enable dhcpcd 2>/dev/null || true
+systemctl start dhcpcd 2>/dev/null || true
+
+# Reset wlan0 interface
+ip link set wlan0 down 2>/dev/null || true
+sleep 1
+ip link set wlan0 up 2>/dev/null || true
+sleep 2
+
 # Ensure wlan0 has static IP for AP mode
-ifconfig wlan0 10.0.0.1 netmask 255.255.255.0
-ifconfig wlan0 up
+ifconfig wlan0 10.0.0.1 netmask 255.255.255.0 up
+
+# Alternative method if ifconfig fails
+if ! ifconfig wlan0 | grep "inet 10.0.0.1" > /dev/null 2>&1; then
+    ip addr flush dev wlan0 2>/dev/null || true
+    ip addr add 10.0.0.1/24 dev wlan0 2>/dev/null || true
+    ip link set wlan0 up 2>/dev/null || true
+fi
 
 # Wait a moment for interface to be ready
-sleep 2
+sleep 3
 
 python3 /usr/lib/raspiwifi/reset_device/reset.py &
 

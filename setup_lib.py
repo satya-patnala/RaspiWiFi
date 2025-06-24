@@ -9,6 +9,16 @@ def install_prereqs():
 	print("Installing Flask web server...")
 	print()
 	os.system('pip3 install flask pyopenssl')
+	
+	# Disable NetworkManager to avoid conflicts with dhcpcd
+	print("Disabling NetworkManager to avoid network conflicts...")
+	os.system('systemctl disable NetworkManager')
+	os.system('systemctl stop NetworkManager')
+	
+	# Ensure dhcpcd is enabled and running
+	os.system('systemctl enable dhcpcd')
+	os.system('systemctl start dhcpcd')
+	
 	os.system('clear')
 
 def copy_configs(wpa_enabled_choice):
@@ -58,8 +68,16 @@ def update_main_config_file(entered_ssid, auto_config_choice, auto_config_delay,
 
 def configure_static_ip():
 	"""Configure wlan0 with static IP 10.0.0.1 before rebooting"""
-	# Ensure wlan0 has static IP configuration
-	dhcpcd_config = """interface wlan0
+	# Stop any conflicting network managers
+	os.system('systemctl stop NetworkManager 2>/dev/null')
+	os.system('systemctl disable NetworkManager 2>/dev/null')
+	
+	# Ensure dhcpcd is running
+	os.system('systemctl enable dhcpcd')
+	os.system('systemctl start dhcpcd')
+		# Ensure wlan0 has static IP configuration
+	dhcpcd_config = """# RaspiWiFi Configuration
+interface wlan0
 static ip_address=10.0.0.1/24
 static routers=10.0.0.1
 static domain_name_servers=8.8.8.8 8.8.4.4
@@ -70,7 +88,11 @@ static domain_name_servers=8.8.8.8 8.8.4.4
 		dhcpcd_file.write(dhcpcd_config)
 	
 	# Set the IP immediately using ifconfig (for instant effect)
-	os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0')
+	os.system('ip link set wlan0 down')
+	os.system('sleep 1')
+	os.system('ip link set wlan0 up')
+	os.system('sleep 2')
+	os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0 up')
 	
 	# Restart dhcpcd service to apply persistent changes
 	os.system('systemctl restart dhcpcd')
@@ -85,6 +107,19 @@ def ensure_wlan0_static_ip():
 	"""Ensure wlan0 always has the static IP when in AP mode"""
 	# Check if we're in host mode (AP mode)
 	if os.path.exists('/etc/raspiwifi/host_mode'):
+		# Stop NetworkManager if it's running
+		os.system('systemctl stop NetworkManager 2>/dev/null')
+		
 		# Set static IP immediately
-		os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0')
-		os.system('ifconfig wlan0 up')
+		os.system('ip link set wlan0 down 2>/dev/null')
+		os.system('sleep 1')
+		os.system('ip link set wlan0 up')
+		os.system('sleep 1')
+		os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0 up')
+		
+		# Verify it worked
+		result = os.system('ifconfig wlan0 | grep "inet 10.0.0.1" > /dev/null')
+		if result != 0:
+			print("Warning: Failed to set wlan0 static IP")
+		else:
+			print("wlan0 static IP set successfully")
