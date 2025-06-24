@@ -56,11 +56,13 @@ def save_wpa_credentials():
     else:
         update_wpa(0, wpa_key)
 
-    def sleep_and_reboot_for_wpa():
+    def sleep_and_restart_services():
         time.sleep(2)
-        os.system('reboot')
+        # Restart hostapd service to apply WPA changes
+        os.system('systemctl restart hostapd')
+        os.system('systemctl restart dnsmasq')
 
-    t = Thread(target=sleep_and_reboot_for_wpa)
+    t = Thread(target=sleep_and_restart_services)
     t.start()
 
     config_hash = config_file_hash()
@@ -85,24 +87,41 @@ def scan_wifi_networks():
     return ap_array
 
 def create_wpa_supplicant(ssid, wifi_key):
-    temp_conf_file = open('wpa_supplicant.conf.tmp', 'w')
+    # Use /tmp directory for temporary file to ensure write permissions
+    temp_file_path = '/tmp/wpa_supplicant.conf.tmp'
+    
+    try:
+        temp_conf_file = open(temp_file_path, 'w')
 
-    temp_conf_file.write('ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n')
-    temp_conf_file.write('update_config=1\n')
-    temp_conf_file.write('\n')
-    temp_conf_file.write('network={\n')
-    temp_conf_file.write('	ssid="' + ssid + '"\n')
+        temp_conf_file.write('ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n')
+        temp_conf_file.write('update_config=1\n')
+        temp_conf_file.write('\n')
+        temp_conf_file.write('network={\n')
+        temp_conf_file.write('	ssid="' + ssid + '"\n')
 
-    if wifi_key == '':
-        temp_conf_file.write('	key_mgmt=NONE\n')
-    else:
-        temp_conf_file.write('	psk="' + wifi_key + '"\n')
+        if wifi_key == '':
+            temp_conf_file.write('	key_mgmt=NONE\n')
+        else:
+            temp_conf_file.write('	psk="' + wifi_key + '"\n')
 
-    temp_conf_file.write('	}')
+        temp_conf_file.write('	}\n')
 
-    temp_conf_file.close
+        temp_conf_file.close()
 
-    os.system('mv wpa_supplicant.conf.tmp /etc/wpa_supplicant/wpa_supplicant.conf')
+        # Move the file and set proper permissions
+        move_result = os.system('mv ' + temp_file_path + ' /etc/wpa_supplicant/wpa_supplicant.conf')
+        if move_result == 0:
+            # Set proper permissions (readable/writable by root only)
+            os.system('chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf')
+            
+            os.system('systemctl unmask wpa_supplicant')
+            os.system('systemctl enable wpa_supplicant')
+            
+            
+    except Exception as e:
+        # Clean up temporary file if it exists
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 
 def set_ap_client_mode():
     os.system('rm -f /etc/raspiwifi/host_mode')
@@ -111,7 +130,18 @@ def set_ap_client_mode():
     os.system('chmod +x /etc/cron.raspiwifi/apclient_bootstrapper')
     os.system('mv /etc/dnsmasq.conf.original /etc/dnsmasq.conf')
     os.system('mv /etc/dhcpcd.conf.original /etc/dhcpcd.conf')
-    os.system('reboot')
+    
+    # Instead of rebooting, restart network services
+    os.system('systemctl stop hostapd')
+    os.system('systemctl stop dnsmasq')
+    os.system('systemctl restart dhcpcd')
+    
+    # Restart network interface to apply new configuration
+    restart_network_interface()
+    
+    # Start client mode services
+    os.system('systemctl start wpa_supplicant')
+    os.system('systemctl enable wpa_supplicant')
 
 def update_wpa(wpa_enabled, wpa_key):
     with fileinput.FileInput('/etc/raspiwifi/raspiwifi.conf', inplace=True) as raspiwifi_conf:
@@ -140,6 +170,16 @@ def config_file_hash():
         config_hash[line_key] = line_value
 
     return config_hash
+
+def restart_network_interface():
+    """Restart wlan0 interface to apply new network configuration"""
+    os.system('ip link set wlan0 down')
+    time.sleep(1)
+    os.system('ip link set wlan0 up')
+    time.sleep(2)
+    
+    # Restart networking to ensure configuration is applied
+    os.system('systemctl restart networking')
 
 
 if __name__ == '__main__':

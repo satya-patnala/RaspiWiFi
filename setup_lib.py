@@ -19,6 +19,7 @@ def copy_configs(wpa_enabled_choice):
 	os.system('rm -f ./tmp/*')
 	os.system('mv /etc/dnsmasq.conf /etc/dnsmasq.conf.original')
 	os.system('cp /usr/lib/raspiwifi/reset_device/static_files/dnsmasq.conf /etc/')
+	os.system('sudo if')
 
 	if wpa_enabled_choice.lower() == "y":
 		os.system('cp /usr/lib/raspiwifi/reset_device/static_files/hostapd.conf.wpa /etc/hostapd/hostapd.conf')
@@ -34,6 +35,9 @@ def copy_configs(wpa_enabled_choice):
 	os.system('echo "@reboot root run-parts /etc/cron.raspiwifi/" >> /etc/crontab')
 	os.system('mv /usr/lib/raspiwifi/reset_device/static_files/raspiwifi.conf /etc/raspiwifi')
 	os.system('touch /etc/raspiwifi/host_mode')
+	
+	# Configure static IP for wlan0 before completing setup
+	configure_static_ip()
 
 def update_main_config_file(entered_ssid, auto_config_choice, auto_config_delay, ssl_enabled_choice, server_port_choice, wpa_enabled_choice, wpa_entered_key):
 	if entered_ssid != "":
@@ -49,3 +53,22 @@ def update_main_config_file(entered_ssid, auto_config_choice, auto_config_delay,
 		os.system('sed -i \'s/ssl_enabled=0/ssl_enabled=1/\' /etc/raspiwifi/raspiwifi.conf')
 	if server_port_choice != "":
 		os.system('sed -i \'s/server_port=80/server_port=' + server_port_choice + '/\' /etc/raspiwifi/raspiwifi.conf')
+
+def configure_static_ip():
+	"""Configure wlan0 with static IP 10.0.0.1 before rebooting"""
+	# Ensure wlan0 has static IP configuration
+	dhcpcd_config = """interface wlan0
+static ip_address=10.0.0.1/24
+static routers=10.0.0.1
+static domain_name_servers=8.8.8.8 8.8.4.4
+"""
+	
+	# Write the static IP configuration to dhcpcd.conf
+	with open('/etc/dhcpcd.conf', 'w') as dhcpcd_file:
+		dhcpcd_file.write(dhcpcd_config)
+	
+	# Restart dhcpcd service to apply changes
+	os.system('systemctl restart dhcpcd')
+	
+	# Give it a moment to apply
+	os.system('sleep 2')
