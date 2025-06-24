@@ -14,9 +14,13 @@ ssid_prefix = config_hash['ssid_prefix'] + " "
 reboot_required = False
 
 
-reboot_required = reset_lib.wpa_check_activate(config_hash['wpa_enabled'], config_hash['wpa_key'])
-
-reboot_required = reset_lib.update_ssid(ssid_prefix, serial_last_four)
+# Check if configuration is in progress and skip reboot if so
+if os.path.exists('/tmp/raspiwifi_configuring'):
+    print("Configuration in progress, skipping automatic reboot")
+    reboot_required = False
+else:
+    reboot_required = reset_lib.wpa_check_activate(config_hash['wpa_enabled'], config_hash['wpa_key'])
+    reboot_required = reset_lib.update_ssid(ssid_prefix, serial_last_four)
 
 if reboot_required == True:
     os.system('reboot')

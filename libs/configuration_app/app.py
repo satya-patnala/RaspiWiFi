@@ -32,17 +32,37 @@ def save_credentials():
     ssid = request.form['ssid']
     wifi_key = request.form['wifi_key']
 
-    create_wpa_supplicant(ssid, wifi_key)
-    
-    # Call set_ap_client_mode() in a thread otherwise the reboot will prevent
-    # the response from getting to the browser
-    def sleep_and_start_ap():
-        time.sleep(2)
-        set_ap_client_mode()
-    t = Thread(target=sleep_and_start_ap)
-    t.start()
+    try:
+        # Create a flag file to prevent reset.py from interfering
+        os.system('touch /tmp/raspiwifi_configuring')
+        
+        # Create wpa_supplicant.conf and verify it was created successfully
+        create_wpa_supplicant(ssid, wifi_key)
+        
+        # Double-check the file exists before proceeding
+        if not os.path.exists('/etc/wpa_supplicant/wpa_supplicant.conf'):
+            raise Exception("wpa_supplicant.conf was not created successfully")
+        
+        # Stop any conflicting services immediately
+        os.system('systemctl stop hostapd')
+        os.system('systemctl stop dnsmasq')
+        
+        # Call set_ap_client_mode() in a thread with a longer delay
+        def sleep_and_start_ap():
+            time.sleep(8)  # Longer delay to ensure all file operations complete
+            # Remove the flag file
+            os.system('rm -f /tmp/raspiwifi_configuring')
+            set_ap_client_mode()
+        t = Thread(target=sleep_and_start_ap)
+        t.start()
 
-    return render_template('save_credentials.html', ssid = ssid)
+        return render_template('save_credentials.html', ssid = ssid)
+        
+    except Exception as e:
+        # Remove flag file on error
+        os.system('rm -f /tmp/raspiwifi_configuring')
+        # Return error page if file creation failed
+        return render_template('save_credentials.html', ssid = ssid, error = str(e))
 
 
 @app.route('/save_wpa_credentials', methods = ['GET', 'POST'])
@@ -91,6 +111,7 @@ def create_wpa_supplicant(ssid, wifi_key):
     temp_file_path = '/tmp/wpa_supplicant.conf.tmp'
     
     try:
+        # Create the temporary file
         temp_conf_file = open(temp_file_path, 'w')
 
         temp_conf_file.write('ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n')
@@ -106,22 +127,51 @@ def create_wpa_supplicant(ssid, wifi_key):
 
         temp_conf_file.write('	}\n')
 
+        # Ensure data is written to disk
+        temp_conf_file.flush()
+        os.fsync(temp_conf_file.fileno())
         temp_conf_file.close()
+
+        # Verify temp file was created successfully
+        if not os.path.exists(temp_file_path):
+            raise Exception("Temporary file was not created")
 
         # Move the file and set proper permissions
         move_result = os.system('mv ' + temp_file_path + ' /etc/wpa_supplicant/wpa_supplicant.conf')
-        if move_result == 0:
-            # Set proper permissions (readable/writable by root only)
-            os.system('chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf')
+        if move_result != 0:
+            raise Exception("Failed to move wpa_supplicant.conf to /etc/wpa_supplicant/")
             
-            os.system('systemctl unmask wpa_supplicant')
-            os.system('systemctl enable wpa_supplicant')
-            
+        # Verify the final file was created
+        if not os.path.exists('/etc/wpa_supplicant/wpa_supplicant.conf'):
+            raise Exception("wpa_supplicant.conf was not created in /etc/wpa_supplicant/")
+
+        # Set proper permissions (readable/writable by root only)
+        os.system('chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf')
+        
+        # Unmask and enable wpa_supplicant service
+        os.system('systemctl unmask wpa_supplicant')
+        os.system('systemctl enable wpa_supplicant')
+        
+        # Force filesystem sync to ensure all writes are completed
+        os.system('sync')
+        
+        # Validate the file contents to ensure it's properly formatted
+        try:
+            with open('/etc/wpa_supplicant/wpa_supplicant.conf', 'r') as f:
+                content = f.read()
+                if 'network={' not in content or ssid not in content:
+                    raise Exception("wpa_supplicant.conf content validation failed")
+        except:
+            raise Exception("Cannot read or validate wpa_supplicant.conf")
+        
+        return True
             
     except Exception as e:
         # Clean up temporary file if it exists
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        # Re-raise the exception so caller knows it failed
+        raise e
 
 def set_ap_client_mode():
     os.system('rm -f /etc/raspiwifi/host_mode')
