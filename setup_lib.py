@@ -19,7 +19,6 @@ def copy_configs(wpa_enabled_choice):
 	os.system('rm -f ./tmp/*')
 	os.system('mv /etc/dnsmasq.conf /etc/dnsmasq.conf.original')
 	os.system('cp /usr/lib/raspiwifi/reset_device/static_files/dnsmasq.conf /etc/')
-	os.system('sudo if')
 
 	if wpa_enabled_choice.lower() == "y":
 		os.system('cp /usr/lib/raspiwifi/reset_device/static_files/hostapd.conf.wpa /etc/hostapd/hostapd.conf')
@@ -33,11 +32,13 @@ def copy_configs(wpa_enabled_choice):
 	os.system('chmod +x /etc/cron.raspiwifi/aphost_bootstrapper')
 	os.system('echo "# RaspiWiFi Startup" >> /etc/crontab')
 	os.system('echo "@reboot root run-parts /etc/cron.raspiwifi/" >> /etc/crontab')
-	os.system('mv /usr/lib/raspiwifi/reset_device/static_files/raspiwifi.conf /etc/raspiwifi')
-	os.system('touch /etc/raspiwifi/host_mode')
+	os.system('mv /usr/lib/raspiwifi/reset_device/static_files/raspiwifi.conf /etc/raspiwifi')	os.system('touch /etc/raspiwifi/host_mode')
 	
 	# Configure static IP for wlan0 before completing setup
 	configure_static_ip()
+	
+	# Also ensure static IP is set immediately
+	ensure_wlan0_static_ip()
 
 def update_main_config_file(entered_ssid, auto_config_choice, auto_config_delay, ssl_enabled_choice, server_port_choice, wpa_enabled_choice, wpa_entered_key):
 	if entered_ssid != "":
@@ -67,8 +68,22 @@ static domain_name_servers=8.8.8.8 8.8.4.4
 	with open('/etc/dhcpcd.conf', 'w') as dhcpcd_file:
 		dhcpcd_file.write(dhcpcd_config)
 	
-	# Restart dhcpcd service to apply changes
+	# Set the IP immediately using ifconfig (for instant effect)
+	os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0')
+	
+	# Restart dhcpcd service to apply persistent changes
 	os.system('systemctl restart dhcpcd')
 	
 	# Give it a moment to apply
-	os.system('sleep 2')
+	os.system('sleep 3')
+	
+	# Verify the IP was set correctly
+	os.system('ifconfig wlan0 | grep "inet 10.0.0.1"')
+
+def ensure_wlan0_static_ip():
+	"""Ensure wlan0 always has the static IP when in AP mode"""
+	# Check if we're in host mode (AP mode)
+	if os.path.exists('/etc/raspiwifi/host_mode'):
+		# Set static IP immediately
+		os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0')
+		os.system('ifconfig wlan0 up')

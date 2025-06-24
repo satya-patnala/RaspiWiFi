@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Ensure wlan0 has static IP for AP mode
+ifconfig wlan0 10.0.0.1 netmask 255.255.255.0
+ifconfig wlan0 up
+
+# Wait a moment for interface to be ready
+sleep 2
+
 python3 /usr/lib/raspiwifi/reset_device/reset.py &
 
 python3 /usr/lib/raspiwifi/configuration_app/app.py &

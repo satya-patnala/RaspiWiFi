@@ -11,6 +11,9 @@ app.debug = True
 
 @app.route('/')
 def index():
+    # Ensure static IP is set for AP mode
+    ensure_ap_mode_ip()
+    
     wifi_ap_array = scan_wifi_networks()
     config_hash = config_file_hash()
 
@@ -231,8 +234,19 @@ def restart_network_interface():
     # Restart networking to ensure configuration is applied
     os.system('systemctl restart networking')
 
+def ensure_ap_mode_ip():
+    """Ensure wlan0 has static IP 10.0.0.1 when in AP mode"""
+    # Check if we're in host mode (AP mode)
+    if os.path.exists('/etc/raspiwifi/host_mode'):
+        # Set static IP immediately for AP mode
+        os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0')
+        os.system('ifconfig wlan0 up')
+
 
 if __name__ == '__main__':
+    # Ensure static IP is set when app starts
+    ensure_ap_mode_ip()
+    
     config_hash = config_file_hash()
 
     if config_hash['ssl_enabled'] == "1":
