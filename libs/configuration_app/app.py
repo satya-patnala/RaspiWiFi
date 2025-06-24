@@ -115,11 +115,20 @@ def create_wpa_supplicant(ssid, wifi_key):
     temp_file_path = '/tmp/wpa_supplicant.conf.tmp'
     
     try:
+        # Clear any NetworkManager connections that might interfere
+        os.system('rm -f /etc/NetworkManager/system-connections/*')
+        
+        # Stop NetworkManager if running to prevent interference
+        os.system('systemctl stop NetworkManager 2>/dev/null')
+        
         # Create the temporary file
         temp_conf_file = open(temp_file_path, 'w')
 
+        # Write ONLY the basic configuration and the new network
+        # This ensures no old networks are present
         temp_conf_file.write('ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n')
         temp_conf_file.write('update_config=1\n')
+        temp_conf_file.write('country=US\n')  # Add country code for better compatibility
         temp_conf_file.write('\n')
         temp_conf_file.write('network={\n')
         temp_conf_file.write('	ssid="' + ssid + '"\n')
@@ -128,7 +137,9 @@ def create_wpa_supplicant(ssid, wifi_key):
             temp_conf_file.write('	key_mgmt=NONE\n')
         else:
             temp_conf_file.write('	psk="' + wifi_key + '"\n')
+            temp_conf_file.write('	key_mgmt=WPA-PSK\n')
 
+        temp_conf_file.write('	priority=1\n')  # Give this network highest priority
         temp_conf_file.write('	}\n')
 
         # Ensure data is written to disk
@@ -140,7 +151,7 @@ def create_wpa_supplicant(ssid, wifi_key):
         if not os.path.exists(temp_file_path):
             raise Exception("Temporary file was not created")
 
-        # Move the file and set proper permissions
+        # Move the file and set proper permissions WITHOUT stopping wpa_supplicant
         move_result = os.system('mv ' + temp_file_path + ' /etc/wpa_supplicant/wpa_supplicant.conf')
         if move_result != 0:
             raise Exception("Failed to move wpa_supplicant.conf to /etc/wpa_supplicant/")
@@ -168,8 +179,8 @@ def create_wpa_supplicant(ssid, wifi_key):
         except:
             raise Exception("Cannot read or validate wpa_supplicant.conf")
         
-        # Immediately try to start wpa_supplicant to begin WiFi connection process
-        os.system('systemctl restart wpa_supplicant')
+        # Tell wpa_supplicant to reload the configuration without stopping the service
+        os.system('wpa_cli -i wlan0 reconfigure')
         
         return True
             
@@ -283,37 +294,104 @@ def ensure_ap_mode_ip():
 def transition_to_client_mode():
     """Properly transition from AP mode to WiFi client mode with NetworkManager support"""
     
-    # Stop AP mode services first
+    # Stop all potentially conflicting network services
     os.system('systemctl stop hostapd')
     os.system('systemctl stop dnsmasq') 
     os.system('systemctl disable hostapd')
     os.system('systemctl disable dnsmasq')
+    os.system('systemctl stop NetworkManager 2>/dev/null')
+    
+    # Clear any existing NetworkManager connections
+    os.system('rm -f /etc/NetworkManager/system-connections/*')
     
     # Remove static IP configuration for wlan0 to allow DHCP
     os.system('ip addr flush dev wlan0')
+    os.system('ip link set wlan0 down')
+    os.system('ip link set wlan0 up')
     
-    # Start wpa_supplicant to connect to WiFi
+    # Kill any existing wpa_supplicant processes
+    os.system('killall wpa_supplicant 2>/dev/null')
+    
+    # Start fresh wpa_supplicant with our configuration
     os.system('systemctl start wpa_supplicant')
     os.system('systemctl enable wpa_supplicant')
     
-    # Wait a moment for wpa_supplicant to start
-    time.sleep(3)
-    
-    # Trigger WiFi connection
-    os.system('wpa_cli -i wlan0 reconfigure')
-    
-    # Wait for connection attempt
+    # Wait a moment for wpa_supplicant to start and read config
     time.sleep(5)
     
+    # Force wpa_supplicant to reconfigure and connect
+    os.system('wpa_cli -i wlan0 reconfigure')
+    os.system('wpa_cli -i wlan0 reassociate')
+    
+    # Wait for connection attempt
+    time.sleep(10)
+    
     # Request DHCP lease for the WiFi connection
+    os.system('dhclient -r wlan0 2>/dev/null')  # Release any existing lease
     os.system('dhclient wlan0')
     
-    # Enable NetworkManager for desktop GUI compatibility
+    # Enable NetworkManager for desktop GUI compatibility after connection is established
     # This makes the WiFi icon work in the Raspberry Pi desktop
+    time.sleep(5)
     os.system('systemctl unmask NetworkManager')
     os.system('systemctl enable NetworkManager')
     os.system('systemctl start NetworkManager')
 
+def debug_wifi_configs():
+    """Debug function to check all WiFi configuration sources"""
+    debug_info = []
+    
+    # Check wpa_supplicant.conf
+    try:
+        with open('/etc/wpa_supplicant/wpa_supplicant.conf', 'r') as f:
+            content = f.read()
+            debug_info.append(f"wpa_supplicant.conf content:\n{content}")
+    except:
+        debug_info.append("wpa_supplicant.conf not found or not readable")
+    
+    # Check NetworkManager connections
+    import glob
+    nm_connections = glob.glob('/etc/NetworkManager/system-connections/*')
+    if nm_connections:
+        debug_info.append(f"NetworkManager connections found: {nm_connections}")
+        for conn in nm_connections:
+            try:
+                with open(conn, 'r') as f:
+                    debug_info.append(f"Connection {conn}:\n{f.read()}")
+            except:
+                debug_info.append(f"Could not read {conn}")
+    else:
+        debug_info.append("No NetworkManager connections found")
+    
+    # Check current WiFi connection
+    import subprocess
+    try:
+        result = subprocess.run(['iwconfig', 'wlan0'], capture_output=True, text=True)
+        debug_info.append(f"Current wlan0 status:\n{result.stdout}")
+    except:
+        debug_info.append("Could not get iwconfig status")
+    
+    # Check dhcpcd.conf
+    try:
+        with open('/etc/dhcpcd.conf', 'r') as f:
+            content = f.read()
+            debug_info.append(f"dhcpcd.conf content:\n{content}")
+    except:
+        debug_info.append("dhcpcd.conf not found or not readable")
+    
+    return debug_info
+
+@app.route('/debug_wifi')
+def debug_wifi():
+    """Debug route to show all WiFi configurations"""
+    if app.debug:  # Only available in debug mode
+        debug_info = debug_wifi_configs()
+        debug_html = "<h1>WiFi Debug Information</h1>"
+        for info in debug_info:
+            debug_html += f"<pre>{info}</pre><hr>"
+        return debug_html
+    else:
+        return "Debug mode not enabled", 403
 
 if __name__ == '__main__':
     # Ensure static IP is set when app starts
