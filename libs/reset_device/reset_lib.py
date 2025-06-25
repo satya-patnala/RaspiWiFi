@@ -16,29 +16,44 @@ def config_file_hash():
 def wpa_check_activate(wpa_enabled, wpa_key):
 	wpa_active = False
 	reboot_required = False
+	current_wpa_key = None
 
-	with open('/etc/hostapd/hostapd.conf') as hostapd_conf:
-		for line in hostapd_conf:
-			if 'wpa_passphrase' in line:
-				wpa_active = True
+	# Check current hostapd configuration
+	try:
+		with open('/etc/hostapd/hostapd.conf') as hostapd_conf:
+			for line in hostapd_conf:
+				if 'wpa_passphrase=' in line:
+					wpa_active = True
+					current_wpa_key = line.strip().split('=', 1)[1]
+					break
+	except:
+		pass
 
+	# Only make changes if configuration has actually changed
 	if wpa_enabled == '1' and wpa_active == False:
+		# Need to enable WPA but it's currently disabled
 		reboot_required = True
 		os.system('cp /usr/lib/raspiwifi/reset_device/static_files/hostapd.conf.wpa /etc/hostapd/hostapd.conf')
-
-	if wpa_enabled == '1':
+		# Update with the correct key
 		with fileinput.FileInput('/etc/hostapd/hostapd.conf', inplace=True) as hostapd_conf:
 			for line in hostapd_conf:
-				if 'wpa_passphrase' in line:
-					if 'wpa_passphrase=' + wpa_key not in line:
-						print('wpa_passphrase=' + wpa_key)
-						os.system('reboot')
-					else:
-						print(line, end = '')
+				if 'wpa_passphrase=' in line:
+					print('wpa_passphrase=' + wpa_key)
+				else:
+					print(line, end = '')
+	
+	elif wpa_enabled == '1' and wpa_active == True and current_wpa_key != wpa_key:
+		# WPA is enabled but key has changed
+		reboot_required = True
+		with fileinput.FileInput('/etc/hostapd/hostapd.conf', inplace=True) as hostapd_conf:
+			for line in hostapd_conf:
+				if 'wpa_passphrase=' in line:
+					print('wpa_passphrase=' + wpa_key)
 				else:
 					print(line, end = '')
 
-	if wpa_enabled == '0' and wpa_active == True:
+	elif wpa_enabled == '0' and wpa_active == True:
+		# Need to disable WPA but it's currently enabled
 		reboot_required = True
 		os.system('cp /usr/lib/raspiwifi/reset_device/static_files/hostapd.conf.nowpa /etc/hostapd/hostapd.conf')
 

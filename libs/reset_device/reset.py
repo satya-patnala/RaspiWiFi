@@ -4,6 +4,10 @@ import time
 import subprocess
 import reset_lib
 
+# Add boot delay to prevent immediate reboot loops
+print("RaspiWiFi: Waiting 10 seconds before checking configuration...")
+time.sleep(10)
+
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(18, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
@@ -18,11 +22,22 @@ reboot_required = False
 if os.path.exists('/tmp/raspiwifi_configuring'):
     print("Configuration in progress, skipping automatic reboot")
     reboot_required = False
+elif os.path.exists('/tmp/raspiwifi_recent_boot'):
+    print("Recent boot detected, skipping reboot to prevent loops")
+    reboot_required = False
 else:
+    # Create flag to prevent reboot loops
+    os.system('touch /tmp/raspiwifi_recent_boot')
+    # Remove the flag after 60 seconds
+    os.system('(sleep 60; rm -f /tmp/raspiwifi_recent_boot) &')
+    
     reboot_required = reset_lib.wpa_check_activate(config_hash['wpa_enabled'], config_hash['wpa_key'])
-    reboot_required = reset_lib.update_ssid(ssid_prefix, serial_last_four)
+    if not reboot_required:
+        reboot_required = reset_lib.update_ssid(ssid_prefix, serial_last_four)
 
 if reboot_required == True:
+    print("RaspiWiFi: Configuration change detected, rebooting in 5 seconds...")
+    time.sleep(5)
     os.system('reboot')
 
 # This is the main logic loop waiting for a button to be pressed on GPIO 18 for 10 seconds.
