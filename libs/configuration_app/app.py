@@ -33,13 +33,23 @@ def save_credentials():
     ssid = request.form['ssid']
     wifi_key = request.form['wifi_key']
     
-    # Store credentials globally for transition function
+    # Log original SSID for debugging
+    print(f"Original SSID: '{ssid}' (length: {len(ssid)})")
+    print(f"SSID bytes: {ssid.encode('utf-8')}")
+    print(f"SSID repr: {repr(ssid)}")
+    
+    # Normalize SSID using centralized function
+    normalized_ssid = normalize_ssid(ssid)
+    
+    if normalized_ssid != ssid:
+        print(f"Normalized SSID: '{normalized_ssid}'")
+    
+    # Use normalized SSID for all operations
+    ssid = normalized_ssid
+    
+    # Store normalized credentials globally for transition function
     current_wifi_credentials['ssid'] = ssid
     current_wifi_credentials['key'] = wifi_key
-    
-    # Log SSID for debugging (helpful for special character issues)
-    print(f"Connecting to SSID: '{ssid}' (length: {len(ssid)})")
-    print(f"SSID bytes: {ssid.encode('utf-8')}")
 
     # Create wpa_supplicant.conf
     create_wpa_supplicant(ssid, wifi_key)
@@ -87,20 +97,47 @@ def save_wpa_credentials():
 
 ######## FUNCTIONS ##########
 
+def normalize_ssid(ssid):
+    """
+    Normalize SSID by converting Unicode smart quotes and special characters 
+    to standard ASCII equivalents for better compatibility
+    """
+    if not ssid:
+        return ssid
+        
+    normalized = ssid
+    # Replace smart quotes with regular quotes
+    normalized = normalized.replace('\u2019', "'")  # Right single quotation mark
+    normalized = normalized.replace('\u2018', "'")  # Left single quotation mark
+    normalized = normalized.replace('\u201c', '"')  # Left double quotation mark
+    normalized = normalized.replace('\u201d', '"')  # Right double quotation mark
+    # Replace em dash and en dash with regular hyphen
+    normalized = normalized.replace('\u2014', '-')  # Em dash
+    normalized = normalized.replace('\u2013', '-')  # En dash
+    # Replace non-breaking space with regular space
+    normalized = normalized.replace('\u00a0', ' ')  # Non-breaking space
+    
+    return normalized
+
 def scan_wifi_networks():
     iwlist_raw = subprocess.Popen(['iwlist', 'scan'], stdout=subprocess.PIPE)
     ap_list, err = iwlist_raw.communicate()
     ap_array = []
 
-    for line in ap_list.decode('utf-8').rsplit('\n'):
+    for line in ap_list.decode('utf-8', errors='replace').rsplit('\n'):
         if 'ESSID' in line:
             ap_ssid = line[27:-1]
             if ap_ssid != '':
+                # Normalize the SSID for consistency
+                ap_ssid = normalize_ssid(ap_ssid)
                 ap_array.append(ap_ssid)
 
     return ap_array
 
 def create_wpa_supplicant(ssid, wifi_key):
+    # Ensure SSID is normalized (defensive programming)
+    ssid = normalize_ssid(ssid)
+    
     # Use /tmp directory for temporary file to ensure write permissions
     temp_file_path = '/tmp/wpa_supplicant.conf.tmp'
     
@@ -287,6 +324,9 @@ def ensure_ap_mode_ip():
 
 def transition_to_client_mode_with_status(ssid):
     """Transition to client mode"""
+    
+    # Ensure SSID is normalized (defensive programming)
+    ssid = normalize_ssid(ssid)
     
     # Stop AP mode services
     os.system('systemctl stop hostapd')
@@ -594,6 +634,9 @@ def create_networkmanager_connection(ssid, wifi_key):
     import uuid
     import secrets
     
+    # Ensure SSID is normalized (defensive programming)
+    ssid = normalize_ssid(ssid)
+    
     try:
         # Create system-connections directory if it doesn't exist
         os.system('mkdir -p /etc/NetworkManager/system-connections')
@@ -713,34 +756,6 @@ def update_connection_status(status):
     status_file = '/tmp/connection_status.json'
     with open(status_file, 'w') as f:
         json.dump(status, f)
-
-def get_wifi_key_from_config(ssid):
-    """Get the WiFi key from wpa_supplicant config for the given SSID"""
-    try:
-        with open('/etc/wpa_supplicant/wpa_supplicant.conf', 'r') as f:
-            content = f.read()
-            # Simple parsing to extract password for the current SSID
-            lines = content.split('\n')
-            in_network = False
-            current_ssid = None
-            
-            for line in lines:
-                line = line.strip()
-                if line.startswith('network={'):
-                    in_network = True
-                elif line == '}' and in_network:
-                    in_network = False
-                    current_ssid = None
-                elif in_network and line.startswith('ssid='):
-                    # Extract SSID (remove quotes)
-                    current_ssid = line.split('=', 1)[1].strip().strip('"')
-                elif in_network and line.startswith('psk=') and current_ssid == ssid:
-                    # Extract password (remove quotes)
-                    return line.split('=', 1)[1].strip().strip('"')
-        return None
-    except Exception as e:
-        print(f"Error reading wpa_supplicant config: {e}")
-        return None
 
 # Store wifi credentials globally for transition function
 current_wifi_credentials = {'ssid': None, 'key': None}
