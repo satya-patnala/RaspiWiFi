@@ -1,5 +1,4 @@
 from flask import Flask, render_template, request, jsonify
-import subprocess
 import os
 import time
 from threading import Thread
@@ -213,10 +212,11 @@ def save_wpa_credentials():
 
     def sleep_and_restart_services():
         time.sleep(2)
-        # Use robust service management for restarting AP services
-        log_status("Restarting AP services after WPA configuration change")
-        robust_service_setup("hostapd", should_be_running=True)
-        robust_service_setup("dnsmasq", should_be_running=True)
+        # Restart hostapd service to apply WPA changes
+        os.system('systemctl unmask hostapd')
+        os.system('systemctl unmask dnsmasq')
+        os.system('systemctl restart hostapd')
+        os.system('systemctl restart dnsmasq')
 
     t = Thread(target=sleep_and_restart_services)
     t.start()
@@ -438,13 +438,12 @@ def transition_to_client_mode_with_status(ssid):
         'message': 'Stopping AP mode services...'
     })
     
-    # Stop all potentially conflicting network services using robust method
-    log_status("Stopping AP mode services...")
-    manage_systemd_service("hostapd", "stop")
-    manage_systemd_service("dnsmasq", "stop")
-    manage_systemd_service("hostapd", "disable")
-    manage_systemd_service("dnsmasq", "disable")
-    manage_systemd_service("NetworkManager", "stop")
+    # Stop all potentially conflicting network services
+    os.system('systemctl stop hostapd')
+    os.system('systemctl stop dnsmasq') 
+    os.system('systemctl disable hostapd')
+    os.system('systemctl disable dnsmasq')
+    os.system('systemctl stop NetworkManager 2>/dev/null')
     
     log_status("Stopped AP mode services")
     
@@ -579,32 +578,31 @@ def transition_to_client_mode_with_status(ssid):
             # Try fallback method with NetworkManager
             log_status("Trying NetworkManager fallback connection method...")
             
-            # Enable and start NetworkManager for fallback using robust method
-            if robust_service_setup("NetworkManager", should_be_running=True):
-                log_status("NetworkManager started successfully")
-                time.sleep(10)  # Give NetworkManager time to start and detect connections
-                
-                # Try to activate the NetworkManager connection we created
-                safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
-                nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
-                if nm_result == 0:
-                    log_status("NetworkManager fallback connection successful!")
-                    update_connection_status({
-                        'state': 'connected',
-                        'ssid': ssid,
-                        'message': 'Connected via NetworkManager fallback'
-                    })
-                else:
-                    log_status("NetworkManager fallback also failed", is_error=True)
-                    # Try legacy wpa_supplicant as last resort
-                    os.system('killall wpa_supplicant 2>/dev/null')
-                    time.sleep(2)
-                    manage_systemd_service("wpa_supplicant", "start")
-                    time.sleep(10)
-                    os.system('dhclient wlan0')
-                    time.sleep(5)
+            # Enable and start NetworkManager for fallback
+            os.system('systemctl unmask NetworkManager')
+            os.system('systemctl enable NetworkManager')
+            os.system('systemctl start NetworkManager')
+            time.sleep(10)  # Give NetworkManager time to start and detect connections
+            
+            # Try to activate the NetworkManager connection we created
+            safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
+            nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+            if nm_result == 0:
+                log_status("NetworkManager fallback connection successful!")
+                update_connection_status({
+                    'state': 'connected',
+                    'ssid': ssid,
+                    'message': 'Connected via NetworkManager fallback'
+                })
             else:
-                log_status("Failed to start NetworkManager for fallback", is_error=True)
+                log_status("NetworkManager fallback also failed", is_error=True)
+                # Try legacy wpa_supplicant as last resort
+                os.system('killall wpa_supplicant 2>/dev/null')
+                time.sleep(2)
+                os.system('systemctl start wpa_supplicant')
+                time.sleep(10)
+                os.system('dhclient wlan0')
+                time.sleep(5)
     else:
         error_msg = "Failed to start wpa_supplicant"
         log_status(error_msg, is_error=True)
@@ -616,19 +614,20 @@ def transition_to_client_mode_with_status(ssid):
         
         # If wpa_supplicant fails completely, try NetworkManager immediately
         log_status("wpa_supplicant failed, trying NetworkManager...")
-        if robust_service_setup("NetworkManager", should_be_running=True):
-            log_status("NetworkManager started successfully after wpa_supplicant failure")
-            time.sleep(10)
-            
-            # Try to connect via NetworkManager
-            nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
-            if nm_result == 0:
-                log_status("NetworkManager connection successful after wpa_supplicant failure!")
-                update_connection_status({
-                    'state': 'connected',
-                    'ssid': ssid,
-                    'message': 'Connected via NetworkManager after wpa_supplicant failure'
-                })
+        os.system('systemctl unmask NetworkManager')
+        os.system('systemctl enable NetworkManager') 
+        os.system('systemctl start NetworkManager')
+        time.sleep(10)
+        
+        # Try to connect via NetworkManager
+        nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+        if nm_result == 0:
+            log_status("NetworkManager connection successful after wpa_supplicant failure!")
+            update_connection_status({
+                'state': 'connected',
+                'ssid': ssid,
+                'message': 'Connected via NetworkManager after wpa_supplicant failure'
+            })
             else:
                 log_status("NetworkManager also failed to connect", is_error=True)
         else:
@@ -637,7 +636,9 @@ def transition_to_client_mode_with_status(ssid):
     # Ensure NetworkManager is available for GUI compatibility
     if os.system('systemctl is-active NetworkManager > /dev/null') != 0:
         log_status("Starting NetworkManager for GUI compatibility...")
-        robust_service_setup("NetworkManager", should_be_running=True)
+        os.system('systemctl unmask NetworkManager')
+        os.system('systemctl enable NetworkManager')
+        os.system('systemctl start NetworkManager')
     
     # Final status check
     final_check()
@@ -873,116 +874,13 @@ def cleanup_old_network_connections():
         log_status(f"Error cleaning up old connections: {str(e)}")
         return False
 
-def manage_systemd_service(service_name, action, verify=False, timeout=10):
-    """
-    Simple and robust systemd service management that won't break the Flask app
-    """
-    try:
-        # Use simple os.system as fallback to avoid complex subprocess issues
-        if action == "unmask":
-            result = os.system(f'systemctl unmask {service_name} 2>/dev/null')
-        elif action == "enable":
-            result = os.system(f'systemctl enable {service_name} 2>/dev/null')
-        elif action == "disable":
-            result = os.system(f'systemctl disable {service_name} 2>/dev/null')
-        elif action == "start":
-            result = os.system(f'systemctl start {service_name} 2>/dev/null')
-        elif action == "stop":
-            result = os.system(f'systemctl stop {service_name} 2>/dev/null')
-        elif action == "restart":
-            result = os.system(f'systemctl restart {service_name} 2>/dev/null')
-        else:
-            return False
-        
-        success = result == 0
-        
-        # Simple logging that won't fail
-        try:
-            if success:
-                log_status(f"Successfully {action}ed {service_name}")
-            else:
-                log_status(f"Failed to {action} {service_name}", is_error=True)
-        except:
-            pass  # Don't let logging failures break service management
-            
-        return success
-        
-    except Exception as e:
-        try:
-            log_status(f"Error managing {service_name}: {str(e)}", is_error=True)
-        except:
-            pass
-        return False
-
-def verify_service_state(service_name, expected_action):
-    """
-    Simple service state verification
-    """
-    try:
-        if expected_action in ["start", "restart"]:
-            result = os.system(f'systemctl is-active {service_name} > /dev/null 2>&1')
-            return result == 0
-        elif expected_action == "stop":
-            result = os.system(f'systemctl is-active {service_name} > /dev/null 2>&1')
-            return result != 0
-        return True
-    except:
-        return True  # Don't fail verification on errors
-
-def robust_service_setup(service_name, should_be_running=True):
-    """
-    Simple service setup that won't break the Flask app
-    """
-    try:
-        success = True
-        
-        # Step 1: Unmask the service
-        if not manage_systemd_service(service_name, "unmask"):
-            success = False
-        
-        # Step 2: Enable the service
-        if not manage_systemd_service(service_name, "enable"):
-            success = False
-        
-        # Step 3: Start the service if requested
-        if should_be_running and not manage_systemd_service(service_name, "start"):
-            success = False
-        
-        return success
-    except:
-        return False
-
 if __name__ == '__main__':
-    try:
-        # Ensure static IP is set when app starts - but don't fail if it doesn't work
-        try:
-            ensure_ap_mode_ip()
-        except Exception as e:
-            print(f"Warning: Failed to set AP mode IP: {e}")
-        
-        # Get config with fallback defaults
-        try:
-            config_hash = config_file_hash()
-            ssl_enabled = config_hash.get('ssl_enabled', '0')
-            server_port = int(config_hash.get('server_port', '80'))
-        except:
-            print("Warning: Failed to read config, using defaults")
-            ssl_enabled = '0'
-            server_port = 80
+    # Ensure static IP is set when app starts
+    ensure_ap_mode_ip()
+    
+    config_hash = config_file_hash()
 
-        print(f"Starting Flask app on port {server_port}")
-        
-        if ssl_enabled == "1":
-            app.run(host='0.0.0.0', port=server_port, ssl_context='adhoc', debug=False)
-        else:
-            app.run(host='0.0.0.0', port=server_port, debug=False)
-            
-    except Exception as e:
-        print(f"Failed to start Flask app: {e}")
-        # Try to start with minimal config as last resort
-        try:
-            print("Attempting to start with minimal configuration...")
-            app.run(host='0.0.0.0', port=80, debug=False)
-        except:
-            print("Failed to start Flask app even with minimal config")
-            exit(1)
+    if config_hash['ssl_enabled'] == "1":
+        app.run(host = '0.0.0.0', port = int(config_hash['server_port']), ssl_context='adhoc')
+    else:
+        app.run(host = '0.0.0.0', port = int(config_hash['server_port']))
