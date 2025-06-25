@@ -463,6 +463,13 @@ def transition_to_client_mode_with_status(ssid):
     os.system('ip link set wlan0 up')
     time.sleep(3)
     
+    # Restart NetworkManager early so it can work alongside wpa_supplicant
+    log_status("Starting NetworkManager for connection management...")
+    os.system('systemctl unmask NetworkManager')
+    os.system('systemctl enable NetworkManager')
+    os.system('systemctl start NetworkManager')
+    time.sleep(5)  # Give NetworkManager time to start
+    
     # Kill any existing wpa_supplicant processes
     os.system('killall wpa_supplicant 2>/dev/null')
     time.sleep(2)
@@ -517,8 +524,20 @@ def transition_to_client_mode_with_status(ssid):
         
         for attempt in range(max_attempts):
             time.sleep(5)
-            result = os.system('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED" > /dev/null')
-            if result == 0:
+            
+            # Check wpa_supplicant connection
+            wpa_result = os.system('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED" > /dev/null')
+            
+            # Also try NetworkManager connection if wpa_supplicant isn't connecting
+            if wpa_result != 0 and attempt >= 2:
+                log_status(f"Attempt {attempt + 1}: Trying NetworkManager connection...")
+                nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+                if nm_result == 0:
+                    log_status("NetworkManager connection successful!")
+                    connected = True
+                    break
+            
+            if wpa_result == 0:
                 connected = True
                 break
             else:
@@ -633,12 +652,15 @@ def transition_to_client_mode_with_status(ssid):
         else:
             log_status("Failed to start NetworkManager as fallback", is_error=True)
     
-    # Ensure NetworkManager is available for GUI compatibility
-    if os.system('systemctl is-active NetworkManager > /dev/null') != 0:
-        log_status("Starting NetworkManager for GUI compatibility...")
+    # NetworkManager should already be running from earlier, but ensure it's active
+    nm_active = os.system('systemctl is-active NetworkManager > /dev/null') == 0
+    if not nm_active:
+        log_status("NetworkManager not active, restarting...")
         os.system('systemctl unmask NetworkManager')
         os.system('systemctl enable NetworkManager')
         os.system('systemctl start NetworkManager')
+    else:
+        log_status("NetworkManager is active and ready")
     
     # Final status check
     final_check()
