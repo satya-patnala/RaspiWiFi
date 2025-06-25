@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request
 import os
 import time
 import subprocess
@@ -33,8 +33,12 @@ def save_credentials():
     ssid = request.form['ssid']
     wifi_key = request.form['wifi_key']
     
-    # Log original SSID for debugging
-    print(f"Original SSID: '{ssid}' (length: {len(ssid)})")
+    # Store credentials globally for transition function
+    current_wifi_credentials['ssid'] = ssid
+    current_wifi_credentials['key'] = wifi_key
+    
+    # Log SSID for debugging (helpful for special character issues)
+    print(f"Connecting to SSID: '{ssid}' (length: {len(ssid)})")
     print(f"SSID bytes: {ssid.encode('utf-8')}")
     print(f"SSID repr: {repr(ssid)}")
     
@@ -394,10 +398,10 @@ def transition_to_client_mode_with_status(ssid):
         try:
             # Try with password if available
             if wifi_key and wifi_key.strip():
-                cmd = ['nmcli', 'device', 'wifi', 'connect', f'"{ssid}"', 'password', f'"{wifi_key}"']
+                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', wifi_key]
                 log_status("Connecting with password...")
             else:
-                cmd = ['nmcli', 'device', 'wifi', 'connect', f'"{ssid}"']
+                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid]
                 log_status("Connecting without password (open network)...")
                 
             log_status(f"Running command: {' '.join(['nmcli', 'device', 'wifi', 'connect', repr(ssid), '...'])}")
@@ -435,7 +439,7 @@ def transition_to_client_mode_with_status(ssid):
             # Try fallback method with connection profile
             log_status("Direct connection failed, trying connection profile method...")
             try:
-                result = subprocess.run(['nmcli', 'connection', 'up', f'"{ssid}"'], 
+                result = subprocess.run(['nmcli', 'connection', 'up', ssid], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
                     log_status("Connection profile method successful!")
