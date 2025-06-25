@@ -647,10 +647,8 @@ def transition_to_client_mode_with_status(ssid):
                 'ssid': ssid,
                 'message': 'Connected via NetworkManager after wpa_supplicant failure'
             })
-            else:
-                log_status("NetworkManager also failed to connect", is_error=True)
         else:
-            log_status("Failed to start NetworkManager as fallback", is_error=True)
+            log_status("NetworkManager also failed to connect", is_error=True)
     
     # NetworkManager should already be running from earlier, but ensure it's active
     nm_active = os.system('systemctl is-active NetworkManager > /dev/null') == 0
