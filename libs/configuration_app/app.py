@@ -145,6 +145,15 @@ def save_credentials():
         create_wpa_supplicant(ssid, wifi_key)
         log_status("wpa_supplicant.conf created successfully")
         
+        # Also create NetworkManager connection for redundancy and compatibility
+        nm_success = create_networkmanager_connection(ssid, wifi_key)
+        if nm_success:
+            log_status("NetworkManager connection created successfully")
+            # Clean up any old conflicting connections
+            cleanup_old_network_connections()
+        else:
+            log_status("NetworkManager connection creation failed (non-critical)", is_error=False)
+        
         # Double-check the file exists before proceeding
         if not os.path.exists('/etc/wpa_supplicant/wpa_supplicant.conf'):
             raise Exception("wpa_supplicant.conf was not created successfully")
@@ -204,6 +213,9 @@ def save_wpa_credentials():
 
     def sleep_and_restart_services():
         time.sleep(2)
+        # Unmask services before restarting them
+        os.system('systemctl unmask hostapd')
+        os.system('systemctl unmask dnsmasq')
         # Restart hostapd service to apply WPA changes
         os.system('systemctl restart hostapd')
         os.system('systemctl restart dnsmasq')
@@ -237,10 +249,7 @@ def create_wpa_supplicant(ssid, wifi_key):
     temp_file_path = '/tmp/wpa_supplicant.conf.tmp'
     
     try:
-        # Clear any NetworkManager connections that might interfere
-        os.system('rm -f /etc/NetworkManager/system-connections/*')
-        
-        # Stop NetworkManager if running to prevent interference
+        # Stop NetworkManager temporarily to prevent interference during configuration
         os.system('systemctl stop NetworkManager 2>/dev/null')
         
         # Create the temporary file
@@ -443,7 +452,7 @@ def ensure_ap_mode_ip():
         os.system('systemctl restart dhcpcd 2>/dev/null')
 
 def transition_to_client_mode_with_status(ssid):
-    """Improved transition function with detailed status tracking"""
+    """Improved transition to client mode with detailed status tracking"""
     
     log_status("Starting transition to client mode...")
     update_connection_status({
@@ -461,8 +470,8 @@ def transition_to_client_mode_with_status(ssid):
     
     log_status("Stopped AP mode services")
     
-    # Clear any existing NetworkManager connections
-    os.system('rm -f /etc/NetworkManager/system-connections/*')
+    # Don't clear NetworkManager connections since we just created one
+    # Instead, let NetworkManager and wpa_supplicant work together
     
     # Remove static IP configuration for wlan0 to allow DHCP
     update_connection_status({
@@ -589,28 +598,66 @@ def transition_to_client_mode_with_status(ssid):
                 'message': f'Failed to connect to WiFi network {ssid}'
             })
             
-            # Try fallback method
-            log_status("Trying fallback connection method...")
-            os.system('killall wpa_supplicant 2>/dev/null')
-            time.sleep(2)
-            os.system('systemctl start wpa_supplicant')
-            time.sleep(10)
-            os.system('dhclient wlan0')
-            time.sleep(5)
+            # Try fallback method with NetworkManager
+            log_status("Trying NetworkManager fallback connection method...")
+            
+            # Enable and start NetworkManager for fallback
+            os.system('systemctl unmask NetworkManager')
+            os.system('systemctl enable NetworkManager')
+            os.system('systemctl start NetworkManager')
+            time.sleep(10)  # Give NetworkManager time to start and detect connections
+            
+            # Try to activate the NetworkManager connection we created
+            safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
+            nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+            if nm_result == 0:
+                log_status("NetworkManager fallback connection successful!")
+                update_connection_status({
+                    'state': 'connected',
+                    'ssid': ssid,
+                    'message': 'Connected via NetworkManager fallback'
+                })
+            else:
+                log_status("NetworkManager fallback also failed", is_error=True)
+                # Try legacy wpa_supplicant as last resort
+                os.system('killall wpa_supplicant 2>/dev/null')
+                time.sleep(2)
+                os.system('systemctl start wpa_supplicant')
+                time.sleep(10)
+                os.system('dhclient wlan0')
+                time.sleep(5)
     else:
         error_msg = "Failed to start wpa_supplicant"
         log_status(error_msg, is_error=True)
         update_connection_status({
             'state': 'wpa_failed',
             'ssid': ssid,
-            'message': error_msg
+            'message': f'{error_msg}, trying NetworkManager...'
         })
+        
+        # If wpa_supplicant fails completely, try NetworkManager immediately
+        log_status("wpa_supplicant failed, trying NetworkManager...")
+        os.system('systemctl unmask NetworkManager')
+        os.system('systemctl enable NetworkManager') 
+        os.system('systemctl start NetworkManager')
+        time.sleep(10)
+        
+        # Try to connect via NetworkManager
+        nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+        if nm_result == 0:
+            log_status("NetworkManager connection successful after wpa_supplicant failure!")
+            update_connection_status({
+                'state': 'connected',
+                'ssid': ssid,
+                'message': 'Connected via NetworkManager after wpa_supplicant failure'
+            })
     
-    # Enable NetworkManager for desktop GUI compatibility after connection attempts
-    log_status("Enabling NetworkManager for GUI compatibility...")
-    os.system('systemctl unmask NetworkManager')
-    os.system('systemctl enable NetworkManager')
-    os.system('systemctl start NetworkManager')
+    # Ensure NetworkManager is available for GUI compatibility
+    if os.system('systemctl is-active NetworkManager > /dev/null') != 0:
+        log_status("Starting NetworkManager for GUI compatibility...")
+        os.system('systemctl unmask NetworkManager')
+        os.system('systemctl enable NetworkManager')
+        os.system('systemctl start NetworkManager')
     
     # Final status check
     final_check()
@@ -730,6 +777,121 @@ def connection_status():
         return status_html
     else:
         return "Debug mode not enabled", 403
+
+def create_networkmanager_connection(ssid, wifi_key):
+    """
+    Create a NetworkManager connection profile for the WiFi network.
+    This provides redundancy and compatibility with NetworkManager-based systems.
+    """
+    import uuid
+    import secrets
+    
+    try:
+        # Create system-connections directory if it doesn't exist
+        os.system('mkdir -p /etc/NetworkManager/system-connections')
+        
+        # Generate a unique UUID for this connection
+        connection_uuid = str(uuid.uuid4())
+        
+        # Create a safe filename (replace spaces and special chars)
+        safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
+        connection_file = f'/etc/NetworkManager/system-connections/{safe_ssid}.nmconnection'
+        
+        # Create temporary file first
+        temp_file = f'/tmp/{safe_ssid}.nmconnection.tmp'
+        
+        with open(temp_file, 'w') as f:
+            f.write('[connection]\n')
+            f.write(f'id={ssid}\n')
+            f.write(f'uuid={connection_uuid}\n')
+            f.write('type=wifi\n')
+            f.write('autoconnect=true\n')
+            f.write('autoconnect-priority=1\n')
+            f.write('\n')
+            
+            f.write('[wifi]\n')
+            f.write(f'ssid={ssid}\n')
+            f.write('mode=infrastructure\n')
+            f.write('hidden=false\n')
+            f.write('\n')
+            
+            if wifi_key == '':
+                # Open network (no security)
+                f.write('[wifi-security]\n')
+                f.write('key-mgmt=none\n')
+            else:
+                # WPA/WPA2 network
+                f.write('[wifi-security]\n')
+                f.write('key-mgmt=wpa-psk\n')
+                f.write('auth-alg=open\n')
+                f.write(f'psk={wifi_key}\n')
+            
+            f.write('\n')
+            f.write('[ipv4]\n')
+            f.write('method=auto\n')
+            f.write('\n')
+            
+            f.write('[ipv6]\n')
+            f.write('method=auto\n')
+            
+        # Move temp file to final location and set permissions
+        move_result = os.system(f'mv {temp_file} {connection_file}')
+        if move_result != 0:
+            raise Exception(f"Failed to create NetworkManager connection file: {connection_file}")
+            
+        # Set strict permissions (only root can read/write)
+        os.system(f'chmod 600 {connection_file}')
+        os.system(f'chown root:root {connection_file}')
+        
+        # Verify file was created
+        if not os.path.exists(connection_file):
+            raise Exception(f"NetworkManager connection file was not created: {connection_file}")
+        
+        print(f"NetworkManager connection created: {connection_file}")
+        return True
+        
+    except Exception as e:
+        # Clean up temp file if it exists
+        temp_file = f'/tmp/{safe_ssid}.nmconnection.tmp'
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        print(f"Failed to create NetworkManager connection: {str(e)}")
+        return False
+
+def cleanup_old_network_connections():
+    """
+    Clean up old or conflicting network connections while preserving the current one
+    """
+    try:
+        # Get list of NetworkManager connections
+        result = os.popen('nmcli -t -f NAME connection show 2>/dev/null').read()
+        connections = [line.strip() for line in result.split('\n') if line.strip()]
+        
+        # Remove old WiFi connections but keep the one we just created
+        current_time = time.time()
+        nm_dir = '/etc/NetworkManager/system-connections'
+        
+        if os.path.exists(nm_dir):
+            for filename in os.listdir(nm_dir):
+                filepath = os.path.join(nm_dir, filename)
+                # If file is older than 1 hour and is a WiFi connection, consider removing it
+                if os.path.isfile(filepath) and filename.endswith('.nmconnection'):
+                    file_age = current_time - os.path.getmtime(filepath)
+                    if file_age > 3600:  # 1 hour
+                        # Check if it's a WiFi connection by reading the file
+                        try:
+                            with open(filepath, 'r') as f:
+                                content = f.read()
+                                if 'type=wifi' in content:
+                                    log_status(f"Removing old WiFi connection: {filename}")
+                                    os.remove(filepath)
+                        except:
+                            pass  # Ignore errors reading old files
+        
+        return True
+    except Exception as e:
+        log_status(f"Error cleaning up old connections: {str(e)}")
+        return False
 
 if __name__ == '__main__':
     # Ensure static IP is set when app starts

@@ -26,8 +26,29 @@ fi
 # Wait a moment for interface to be ready
 sleep 3
 
+# Unmask and prepare hostapd and dnsmasq services before starting them
+systemctl unmask hostapd 2>/dev/null || true
+systemctl unmask dnsmasq 2>/dev/null || true
+
+# Ensure services are enabled for AP mode
+systemctl enable hostapd 2>/dev/null || true
+systemctl enable dnsmasq 2>/dev/null || true
+
+# Stop any existing instances
+systemctl stop hostapd 2>/dev/null || true
+systemctl stop dnsmasq 2>/dev/null || true
+pkill -f hostapd 2>/dev/null || true
+pkill -f dnsmasq 2>/dev/null || true
+
+# Give services time to stop
+sleep 2
+
 python3 /usr/lib/raspiwifi/reset_device/reset.py &
 
 python3 /usr/lib/raspiwifi/configuration_app/app.py &
 
-hostapd -dd /etc/hostapd/hostapd.conf &
+# Start dnsmasq service first
+systemctl start dnsmasq 2>/dev/null || dnsmasq &
+
+# Start hostapd service
+systemctl start hostapd 2>/dev/null || hostapd -dd /etc/hostapd/hostapd.conf &

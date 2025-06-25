@@ -2,13 +2,17 @@ import os
 
 def install_prereqs():
 	os.system('clear')
-	os.system('apt update')
-	os.system('clear')
+	os.system('apt update')	os.system('clear')
 	os.system('apt install python3 python3-rpi.gpio python3-pip dnsmasq hostapd -y')
 	os.system('clear')
 	print("Installing Flask web server...")
 	print()
 	os.system('pip3 install flask pyopenssl')
+	
+	# Unmask hostapd and dnsmasq services to ensure they can be started
+	print("Unmasking hostapd and dnsmasq services...")
+	os.system('systemctl unmask hostapd')
+	os.system('systemctl unmask dnsmasq')
 	
 	# Disable NetworkManager to avoid conflicts with dhcpcd
 	print("Disabling NetworkManager to avoid network conflicts...")
