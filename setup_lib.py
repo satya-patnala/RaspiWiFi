@@ -6,23 +6,49 @@ def install_prereqs():
 	os.system('clear')
 	os.system('apt install python3 python3-rpi.gpio python3-pip dnsmasq hostapd -y')
 	os.system('clear')
-	print("Installing Flask web server...")
-	print()
+	print("Installing Flask web server...")	print()
 	os.system('pip3 install flask pyopenssl')
 	
-	# Unmask hostapd and dnsmasq services to ensure they can be started
-	print("Unmasking hostapd and dnsmasq services...")
-	os.system('systemctl unmask hostapd')
-	os.system('systemctl unmask dnsmasq')
+	# Robust service management during setup
+	print("Configuring system services...")
+	
+	# Function to robustly manage services during setup
+	def setup_service(service_name, should_enable=True, should_start=True):
+		print(f"Setting up {service_name}...")
+		
+		# Unmask first
+		result = os.system(f'systemctl unmask {service_name} 2>/dev/null')
+		if result != 0:
+			print(f"Warning: Could not unmask {service_name}")
+		
+		# Enable if requested
+		if should_enable:
+			result = os.system(f'systemctl enable {service_name} 2>/dev/null')
+			if result != 0:
+				print(f"Warning: Could not enable {service_name}")
+		
+		# Start if requested
+		if should_start:
+			result = os.system(f'systemctl start {service_name} 2>/dev/null')
+			if result != 0:
+				print(f"Warning: Could not start {service_name}")
+		
+		# Verify the service state
+		os.system(f'systemctl is-enabled {service_name} 2>/dev/null && echo "{service_name} is enabled" || echo "{service_name} is not enabled"')
+		if should_start:
+			os.system(f'systemctl is-active {service_name} 2>/dev/null && echo "{service_name} is running" || echo "{service_name} is not running"')
+	
+	# Unmask and enable hostapd and dnsmasq (but don't start them yet)
+	setup_service('hostapd', should_enable=True, should_start=False)
+	setup_service('dnsmasq', should_enable=True, should_start=False)
 	
 	# Disable NetworkManager to avoid conflicts with dhcpcd
 	print("Disabling NetworkManager to avoid network conflicts...")
-	os.system('systemctl disable NetworkManager')
-	os.system('systemctl stop NetworkManager')
+	os.system('systemctl disable NetworkManager 2>/dev/null')
+	os.system('systemctl stop NetworkManager 2>/dev/null')
 	
 	# Ensure dhcpcd is enabled and running
-	os.system('systemctl enable dhcpcd')
-	os.system('systemctl start dhcpcd')
+	setup_service('dhcpcd', should_enable=True, should_start=True)
 	
 	os.system('clear')
 

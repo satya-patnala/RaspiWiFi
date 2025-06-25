@@ -213,12 +213,10 @@ def save_wpa_credentials():
 
     def sleep_and_restart_services():
         time.sleep(2)
-        # Unmask services before restarting them
-        os.system('systemctl unmask hostapd')
-        os.system('systemctl unmask dnsmasq')
-        # Restart hostapd service to apply WPA changes
-        os.system('systemctl restart hostapd')
-        os.system('systemctl restart dnsmasq')
+        # Use robust service management for restarting AP services
+        log_status("Restarting AP services after WPA configuration change")
+        robust_service_setup("hostapd", should_be_running=True)
+        robust_service_setup("dnsmasq", should_be_running=True)
 
     t = Thread(target=sleep_and_restart_services)
     t.start()
@@ -267,29 +265,8 @@ def create_wpa_supplicant(ssid, wifi_key):
         if wifi_key == '':
             temp_conf_file.write('	key_mgmt=NONE\n')
         else:
-            # Generate PSK hash for better compatibility
-            psk_result = os.system('wpa_passphrase "' + ssid + '" "' + wifi_key + '" > /tmp/wpa_psk.tmp 2>/dev/null')
-            if psk_result == 0:
-                # Extract PSK from wpa_passphrase output
-                try:
-                    with open('/tmp/wpa_psk.tmp', 'r') as psk_file:
-                        psk_content = psk_file.read()
-                        for line in psk_content.split('\n'):
-                            if line.strip().startswith('psk=') and not line.strip().startswith('psk="'):
-                                psk_hash = line.strip().split('=')[1]
-                                temp_conf_file.write('	psk=' + psk_hash + '\n')
-                                break
-                        else:
-                            # Fallback to plain text password
-                            temp_conf_file.write('	psk="' + wifi_key + '"\n')
-                except:
-                    # Fallback to plain text password
-                    temp_conf_file.write('	psk="' + wifi_key + '"\n')
-                os.system('rm -f /tmp/wpa_psk.tmp')
-            else:
-                # Fallback to plain text password
-                temp_conf_file.write('	psk="' + wifi_key + '"\n')
-            
+            # Use plain text password for better compatibility and simplicity
+            temp_conf_file.write('	psk="' + wifi_key + '"\n')
             temp_conf_file.write('	key_mgmt=WPA-PSK\n')
             temp_conf_file.write('	proto=RSN WPA\n')  # Support both WPA and WPA2
             temp_conf_file.write('	pairwise=CCMP TKIP\n')  # Support both encryption types
@@ -461,12 +438,13 @@ def transition_to_client_mode_with_status(ssid):
         'message': 'Stopping AP mode services...'
     })
     
-    # Stop all potentially conflicting network services
-    os.system('systemctl stop hostapd')
-    os.system('systemctl stop dnsmasq') 
-    os.system('systemctl disable hostapd')
-    os.system('systemctl disable dnsmasq')
-    os.system('systemctl stop NetworkManager 2>/dev/null')
+    # Stop all potentially conflicting network services using robust method
+    log_status("Stopping AP mode services...")
+    manage_systemd_service("hostapd", "stop")
+    manage_systemd_service("dnsmasq", "stop")
+    manage_systemd_service("hostapd", "disable")
+    manage_systemd_service("dnsmasq", "disable")
+    manage_systemd_service("NetworkManager", "stop")
     
     log_status("Stopped AP mode services")
     
@@ -601,31 +579,32 @@ def transition_to_client_mode_with_status(ssid):
             # Try fallback method with NetworkManager
             log_status("Trying NetworkManager fallback connection method...")
             
-            # Enable and start NetworkManager for fallback
-            os.system('systemctl unmask NetworkManager')
-            os.system('systemctl enable NetworkManager')
-            os.system('systemctl start NetworkManager')
-            time.sleep(10)  # Give NetworkManager time to start and detect connections
-            
-            # Try to activate the NetworkManager connection we created
-            safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
-            nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
-            if nm_result == 0:
-                log_status("NetworkManager fallback connection successful!")
-                update_connection_status({
-                    'state': 'connected',
-                    'ssid': ssid,
-                    'message': 'Connected via NetworkManager fallback'
-                })
+            # Enable and start NetworkManager for fallback using robust method
+            if robust_service_setup("NetworkManager", should_be_running=True):
+                log_status("NetworkManager started successfully")
+                time.sleep(10)  # Give NetworkManager time to start and detect connections
+                
+                # Try to activate the NetworkManager connection we created
+                safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
+                nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+                if nm_result == 0:
+                    log_status("NetworkManager fallback connection successful!")
+                    update_connection_status({
+                        'state': 'connected',
+                        'ssid': ssid,
+                        'message': 'Connected via NetworkManager fallback'
+                    })
+                else:
+                    log_status("NetworkManager fallback also failed", is_error=True)
+                    # Try legacy wpa_supplicant as last resort
+                    os.system('killall wpa_supplicant 2>/dev/null')
+                    time.sleep(2)
+                    manage_systemd_service("wpa_supplicant", "start")
+                    time.sleep(10)
+                    os.system('dhclient wlan0')
+                    time.sleep(5)
             else:
-                log_status("NetworkManager fallback also failed", is_error=True)
-                # Try legacy wpa_supplicant as last resort
-                os.system('killall wpa_supplicant 2>/dev/null')
-                time.sleep(2)
-                os.system('systemctl start wpa_supplicant')
-                time.sleep(10)
-                os.system('dhclient wlan0')
-                time.sleep(5)
+                log_status("Failed to start NetworkManager for fallback", is_error=True)
     else:
         error_msg = "Failed to start wpa_supplicant"
         log_status(error_msg, is_error=True)
@@ -637,27 +616,28 @@ def transition_to_client_mode_with_status(ssid):
         
         # If wpa_supplicant fails completely, try NetworkManager immediately
         log_status("wpa_supplicant failed, trying NetworkManager...")
-        os.system('systemctl unmask NetworkManager')
-        os.system('systemctl enable NetworkManager') 
-        os.system('systemctl start NetworkManager')
-        time.sleep(10)
-        
-        # Try to connect via NetworkManager
-        nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
-        if nm_result == 0:
-            log_status("NetworkManager connection successful after wpa_supplicant failure!")
-            update_connection_status({
-                'state': 'connected',
-                'ssid': ssid,
-                'message': 'Connected via NetworkManager after wpa_supplicant failure'
-            })
+        if robust_service_setup("NetworkManager", should_be_running=True):
+            log_status("NetworkManager started successfully after wpa_supplicant failure")
+            time.sleep(10)
+            
+            # Try to connect via NetworkManager
+            nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+            if nm_result == 0:
+                log_status("NetworkManager connection successful after wpa_supplicant failure!")
+                update_connection_status({
+                    'state': 'connected',
+                    'ssid': ssid,
+                    'message': 'Connected via NetworkManager after wpa_supplicant failure'
+                })
+            else:
+                log_status("NetworkManager also failed to connect", is_error=True)
+        else:
+            log_status("Failed to start NetworkManager as fallback", is_error=True)
     
     # Ensure NetworkManager is available for GUI compatibility
     if os.system('systemctl is-active NetworkManager > /dev/null') != 0:
         log_status("Starting NetworkManager for GUI compatibility...")
-        os.system('systemctl unmask NetworkManager')
-        os.system('systemctl enable NetworkManager')
-        os.system('systemctl start NetworkManager')
+        robust_service_setup("NetworkManager", should_be_running=True)
     
     # Final status check
     final_check()
@@ -892,6 +872,138 @@ def cleanup_old_network_connections():
     except Exception as e:
         log_status(f"Error cleaning up old connections: {str(e)}")
         return False
+
+def manage_systemd_service(service_name, action, verify=True, timeout=10):
+    """
+    Robust systemd service management with error checking and verification
+    """
+    import subprocess
+    import time
+    
+    try:
+        log_status(f"Managing service {service_name}: {action}")
+        
+        if action == "unmask":
+            cmd = ['systemctl', 'unmask', service_name]
+        elif action == "mask":
+            cmd = ['systemctl', 'mask', service_name]
+        elif action == "enable":
+            cmd = ['systemctl', 'enable', service_name]
+        elif action == "disable":
+            cmd = ['systemctl', 'disable', service_name]
+        elif action == "start":
+            cmd = ['systemctl', 'start', service_name]
+        elif action == "stop":
+            cmd = ['systemctl', 'stop', service_name]
+        elif action == "restart":
+            cmd = ['systemctl', 'restart', service_name]
+        else:
+            log_status(f"Unknown action {action} for service {service_name}", is_error=True)
+            return False
+        
+        # Execute the command with proper error handling
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        
+        if result.returncode == 0:
+            log_status(f"Successfully {action}ed {service_name}")
+            
+            # Verify the action if requested
+            if verify:
+                time.sleep(2)  # Give systemd time to process
+                return verify_service_state(service_name, action)
+            return True
+        else:
+            error_msg = f"Failed to {action} {service_name}: {result.stderr}"
+            log_status(error_msg, is_error=True)
+            return False
+            
+    except subprocess.TimeoutExpired:
+        log_status(f"Timeout while trying to {action} {service_name}", is_error=True)
+        return False
+    except Exception as e:
+        log_status(f"Exception while managing {service_name}: {str(e)}", is_error=True)
+        return False
+
+def verify_service_state(service_name, expected_action):
+    """
+    Verify that a service is in the expected state after an action
+    """
+    import subprocess
+    
+    try:
+        if expected_action in ["start", "restart"]:
+            # Check if service is active
+            result = subprocess.run(['systemctl', 'is-active', service_name], 
+                                  capture_output=True, text=True)
+            is_active = result.returncode == 0 and result.stdout.strip() == 'active'
+            if is_active:
+                log_status(f"Verified: {service_name} is active")
+                return True
+            else:
+                log_status(f"Verification failed: {service_name} is not active", is_error=True)
+                return False
+                
+        elif expected_action == "stop":
+            # Check if service is inactive
+            result = subprocess.run(['systemctl', 'is-active', service_name], 
+                                  capture_output=True, text=True)
+            is_inactive = result.returncode != 0 or result.stdout.strip() != 'active'
+            if is_inactive:
+                log_status(f"Verified: {service_name} is stopped")
+                return True
+            else:
+                log_status(f"Verification failed: {service_name} is still active", is_error=True)
+                return False
+                
+        elif expected_action == "enable":
+            # Check if service is enabled
+            result = subprocess.run(['systemctl', 'is-enabled', service_name], 
+                                  capture_output=True, text=True)
+            is_enabled = result.returncode == 0 and result.stdout.strip() == 'enabled'
+            if is_enabled:
+                log_status(f"Verified: {service_name} is enabled")
+                return True
+            else:
+                log_status(f"Verification failed: {service_name} is not enabled", is_error=True)
+                return False
+        
+        elif expected_action == "unmask":
+            # Check if service is not masked
+            result = subprocess.run(['systemctl', 'is-enabled', service_name], 
+                                  capture_output=True, text=True)
+            is_not_masked = 'masked' not in result.stdout.strip()
+            if is_not_masked:
+                log_status(f"Verified: {service_name} is unmasked")
+                return True
+            else:
+                log_status(f"Verification failed: {service_name} is still masked", is_error=True)
+                return False
+        
+        return True  # For actions that don't need verification
+        
+    except Exception as e:
+        log_status(f"Error verifying {service_name} state: {str(e)}", is_error=True)
+        return False
+
+def robust_service_setup(service_name, should_be_running=True):
+    """
+    Robustly set up a service: unmask, enable, and optionally start
+    """
+    success = True
+    
+    # Step 1: Unmask the service
+    if not manage_systemd_service(service_name, "unmask"):
+        success = False
+    
+    # Step 2: Enable the service
+    if not manage_systemd_service(service_name, "enable"):
+        success = False
+    
+    # Step 3: Start the service if requested
+    if should_be_running and not manage_systemd_service(service_name, "start"):
+        success = False
+    
+    return success
 
 if __name__ == '__main__':
     # Ensure static IP is set when app starts

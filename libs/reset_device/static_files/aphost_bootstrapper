@@ -26,29 +26,77 @@ fi
 # Wait a moment for interface to be ready
 sleep 3
 
-# Unmask and prepare hostapd and dnsmasq services before starting them
-systemctl unmask hostapd 2>/dev/null || true
-systemctl unmask dnsmasq 2>/dev/null || true
+# Function to robustly manage systemd services
+manage_service() {
+    local service=$1
+    local action=$2
+    echo "Managing $service: $action"
+    
+    case $action in
+        "unmask")
+            systemctl unmask $service 2>/dev/null || true
+            sleep 1
+            # Verify it worked
+            if systemctl is-enabled $service 2>/dev/null | grep -q "masked"; then
+                echo "WARNING: Failed to unmask $service"
+                return 1
+            fi
+            ;;
+        "enable")
+            systemctl enable $service 2>/dev/null || true
+            sleep 1
+            ;;
+        "start")
+            systemctl start $service 2>/dev/null || true
+            sleep 2
+            # Verify service started
+            if ! systemctl is-active $service >/dev/null 2>&1; then
+                echo "WARNING: $service failed to start"
+                return 1
+            fi
+            ;;
+        "stop")
+            systemctl stop $service 2>/dev/null || true
+            pkill -f $service 2>/dev/null || true
+            sleep 1
+            ;;
+    esac
+    return 0
+}
 
-# Ensure services are enabled for AP mode
-systemctl enable hostapd 2>/dev/null || true
-systemctl enable dnsmasq 2>/dev/null || true
+# Unmask and prepare hostapd and dnsmasq services before starting them
+echo "Setting up AP mode services..."
+manage_service hostapd unmask
+manage_service dnsmasq unmask
+manage_service hostapd enable
+manage_service dnsmasq enable
 
 # Stop any existing instances
-systemctl stop hostapd 2>/dev/null || true
-systemctl stop dnsmasq 2>/dev/null || true
-pkill -f hostapd 2>/dev/null || true
-pkill -f dnsmasq 2>/dev/null || true
+manage_service hostapd stop
+manage_service dnsmasq stop
 
-# Give services time to stop
-sleep 2
+# Give services time to stop completely
+sleep 3
 
 python3 /usr/lib/raspiwifi/reset_device/reset.py &
 
 python3 /usr/lib/raspiwifi/configuration_app/app.py &
 
-# Start dnsmasq service first
-systemctl start dnsmasq 2>/dev/null || dnsmasq &
+# Start services with verification
+echo "Starting dnsmasq..."
+if ! manage_service dnsmasq start; then
+    echo "Fallback: Starting dnsmasq manually"
+    dnsmasq &
+fi
 
-# Start hostapd service
-systemctl start hostapd 2>/dev/null || hostapd -dd /etc/hostapd/hostapd.conf &
+echo "Starting hostapd..."
+if ! manage_service hostapd start; then
+    echo "Fallback: Starting hostapd manually"
+    hostapd -dd /etc/hostapd/hostapd.conf &
+fi
+
+# Verify services are running
+sleep 5
+echo "=== Service Status Check ==="
+systemctl is-active hostapd && echo "hostapd: OK" || echo "hostapd: FAILED"
+systemctl is-active dnsmasq && echo "dnsmasq: OK" || echo "dnsmasq: FAILED"
