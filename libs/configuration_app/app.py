@@ -33,6 +33,10 @@ def save_credentials():
     ssid = request.form['ssid']
     wifi_key = request.form['wifi_key']
     
+    # Store credentials globally for transition function
+    current_wifi_credentials['ssid'] = ssid
+    current_wifi_credentials['key'] = wifi_key
+    
     # Log SSID for debugging (helpful for special character issues)
     print(f"Connecting to SSID: '{ssid}' (length: {len(ssid)})")
     print(f"SSID bytes: {ssid.encode('utf-8')}")
@@ -324,12 +328,32 @@ def transition_to_client_mode_with_status(ssid):
             'message': 'Attempting WiFi connection via NetworkManager...'
         })
         
-        log_status("Attempting NetworkManager connection...")
+        log_status(f"Attempting NetworkManager connection to '{ssid}'...")
+        log_status(f"SSID contains: spaces={' ' in ssid}, apostrophe={chr(39) in ssid}")
+        
+        # Get WiFi key from stored credentials
+        wifi_key = current_wifi_credentials.get('key', '')
+        
         # Use subprocess for better shell escaping instead of os.system
         try:
-            result = subprocess.run(['nmcli', 'device', 'wifi', 'connect', ssid], 
-                                  capture_output=True, text=True, timeout=30)
+            # Try with password if available
+            if wifi_key and wifi_key.strip():
+                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', wifi_key]
+                log_status("Connecting with password...")
+            else:
+                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid]
+                log_status("Connecting without password (open network)...")
+                
+            log_status(f"Running command: {' '.join(['nmcli', 'device', 'wifi', 'connect', repr(ssid), '...'])}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             nm_result = result.returncode
+            
+            if nm_result != 0:
+                log_status(f"NetworkManager error: {result.stderr.strip()}")
+                log_status(f"NetworkManager stdout: {result.stdout.strip()}")
+            else:
+                log_status("NetworkManager command completed successfully")
+                
         except subprocess.TimeoutExpired:
             log_status("NetworkManager connection timed out")
             nm_result = 1
@@ -351,8 +375,31 @@ def transition_to_client_mode_with_status(ssid):
                 })
                 final_check()
                 return
+        else:
+            # Try fallback method with connection profile
+            log_status("Direct connection failed, trying connection profile method...")
+            try:
+                result = subprocess.run(['nmcli', 'connection', 'up', ssid], 
+                                      capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    log_status("Connection profile method successful!")
+                    time.sleep(3)
+                    ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+                    if ip_result == 0:
+                        log_status("IP address obtained via connection profile!")
+                        update_connection_status({
+                            'state': 'connected',
+                            'ssid': ssid,
+                            'message': 'Connected via NetworkManager profile'
+                        })
+                        final_check()
+                        return
+                else:
+                    log_status(f"Connection profile error: {result.stderr.strip()}")
+            except Exception as e:
+                log_status(f"Connection profile method error: {str(e)}")
     
-    # If NetworkManager failed, try wpa_supplicant as fallback
+    # If NetworkManager failed completely, try wpa_supplicant as fallback
     log_status("NetworkManager connection failed, trying wpa_supplicant fallback...")
     
     # Stop NetworkManager to avoid conflicts
@@ -554,12 +601,11 @@ def create_networkmanager_connection(ssid, wifi_key):
         # Generate a unique UUID for this connection
         connection_uuid = str(uuid.uuid4())
         
-        # Create a safe filename (replace spaces and special chars)
-        safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_').replace("'", '_')
-        connection_file = f'/etc/NetworkManager/system-connections/{safe_ssid}.nmconnection'
+        # Use UUID for filename to avoid filesystem issues with special characters
+        connection_file = f'/etc/NetworkManager/system-connections/{connection_uuid}.nmconnection'
         
         # Create temporary file first
-        temp_file = f'/tmp/{safe_ssid}.nmconnection.tmp'
+        temp_file = f'/tmp/{connection_uuid}.nmconnection.tmp'
         
         with open(temp_file, 'w') as f:
             f.write('[connection]\n')
@@ -611,7 +657,7 @@ def create_networkmanager_connection(ssid, wifi_key):
         
     except Exception as e:
         # Clean up temp file if it exists
-        temp_file = f'/tmp/{safe_ssid}.nmconnection.tmp'
+        temp_file = f'/tmp/{connection_uuid}.nmconnection.tmp'
         if os.path.exists(temp_file):
             os.remove(temp_file)
         print(f"Failed to create NetworkManager connection: {str(e)}")
@@ -667,6 +713,37 @@ def update_connection_status(status):
     status_file = '/tmp/connection_status.json'
     with open(status_file, 'w') as f:
         json.dump(status, f)
+
+def get_wifi_key_from_config(ssid):
+    """Get the WiFi key from wpa_supplicant config for the given SSID"""
+    try:
+        with open('/etc/wpa_supplicant/wpa_supplicant.conf', 'r') as f:
+            content = f.read()
+            # Simple parsing to extract password for the current SSID
+            lines = content.split('\n')
+            in_network = False
+            current_ssid = None
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith('network={'):
+                    in_network = True
+                elif line == '}' and in_network:
+                    in_network = False
+                    current_ssid = None
+                elif in_network and line.startswith('ssid='):
+                    # Extract SSID (remove quotes)
+                    current_ssid = line.split('=', 1)[1].strip().strip('"')
+                elif in_network and line.startswith('psk=') and current_ssid == ssid:
+                    # Extract password (remove quotes)
+                    return line.split('=', 1)[1].strip().strip('"')
+        return None
+    except Exception as e:
+        print(f"Error reading wpa_supplicant config: {e}")
+        return None
+
+# Store wifi credentials globally for transition function
+current_wifi_credentials = {'ssid': None, 'key': None}
 
 if __name__ == '__main__':
     config_hash = config_file_hash()
