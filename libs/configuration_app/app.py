@@ -32,6 +32,10 @@ def wpa_settings():
 def save_credentials():
     ssid = request.form['ssid']
     wifi_key = request.form['wifi_key']
+    
+    # Log SSID for debugging (helpful for special character issues)
+    print(f"Connecting to SSID: '{ssid}' (length: {len(ssid)})")
+    print(f"SSID bytes: {ssid.encode('utf-8')}")
 
     # Create wpa_supplicant.conf
     create_wpa_supplicant(ssid, wifi_key)
@@ -321,7 +325,18 @@ def transition_to_client_mode_with_status(ssid):
         })
         
         log_status("Attempting NetworkManager connection...")
-        nm_result = os.system(f'nmcli device wifi connect "{ssid}" 2>/dev/null')
+        # Use subprocess for better shell escaping instead of os.system
+        try:
+            result = subprocess.run(['nmcli', 'device', 'wifi', 'connect', ssid], 
+                                  capture_output=True, text=True, timeout=30)
+            nm_result = result.returncode
+        except subprocess.TimeoutExpired:
+            log_status("NetworkManager connection timed out")
+            nm_result = 1
+        except Exception as e:
+            log_status(f"NetworkManager connection error: {str(e)}")
+            nm_result = 1
+            
         if nm_result == 0:
             log_status("NetworkManager connection successful!")
             time.sleep(3)
@@ -540,7 +555,7 @@ def create_networkmanager_connection(ssid, wifi_key):
         connection_uuid = str(uuid.uuid4())
         
         # Create a safe filename (replace spaces and special chars)
-        safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
+        safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_').replace("'", '_')
         connection_file = f'/etc/NetworkManager/system-connections/{safe_ssid}.nmconnection'
         
         # Create temporary file first
