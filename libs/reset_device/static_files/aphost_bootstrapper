@@ -80,7 +80,24 @@ sleep 3
 
 python3 /usr/lib/raspiwifi/reset_device/reset.py &
 
-python3 /usr/lib/raspiwifi/configuration_app/app.py &
+# Start Flask app with error handling
+echo "Starting Flask configuration app..."
+cd /usr/lib/raspiwifi/configuration_app
+python3 app.py > /tmp/raspiwifi_flask.log 2>&1 &
+FLASK_PID=$!
+
+# Give Flask a moment to start
+sleep 3
+
+# Check if Flask is still running
+if kill -0 $FLASK_PID 2>/dev/null; then
+    echo "✅ Flask app started successfully (PID: $FLASK_PID)"
+else
+    echo "❌ Flask app failed to start, check /tmp/raspiwifi_flask.log"
+    echo "Attempting fallback startup..."
+    # Try starting without changing directory
+    python3 /usr/lib/raspiwifi/configuration_app/app.py > /tmp/raspiwifi_flask_fallback.log 2>&1 &
+fi
 
 # Start services with verification
 echo "Starting dnsmasq..."
