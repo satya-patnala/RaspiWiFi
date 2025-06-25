@@ -5,131 +5,18 @@ import subprocess
 from threading import Thread
 import fileinput
 import json
-from datetime import datetime
 
 app = Flask(__name__)
 app.debug = True
 
-# Status file paths for debugging
-STATUS_DIR = '/tmp/raspiwifi_status'
-LAST_ERROR_FILE = os.path.join(STATUS_DIR, 'last_error.txt')
-LAST_SUCCESS_FILE = os.path.join(STATUS_DIR, 'last_success.txt')
-CONNECTION_STATUS_FILE = os.path.join(STATUS_DIR, 'connection_status.json')
-CONFIG_LOG_FILE = os.path.join(STATUS_DIR, 'config_attempts.log')
-
-def ensure_status_dir():
-    """Ensure status directory exists"""
-    if not os.path.exists(STATUS_DIR):
-        os.makedirs(STATUS_DIR)
-
-def log_status(message, is_error=False):
-    """Log status messages to files for debugging"""
-    ensure_status_dir()
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    # Log to config attempts log
-    with open(CONFIG_LOG_FILE, 'a') as f:
-        f.write(f"[{timestamp}] {message}\n")
-    
-    # Update last error or success file
-    target_file = LAST_ERROR_FILE if is_error else LAST_SUCCESS_FILE
-    with open(target_file, 'w') as f:
-        f.write(f"[{timestamp}] {message}\n")
-
-def update_connection_status(status_data):
-    """Update connection status file"""
-    ensure_status_dir()
-    status_data['timestamp'] = datetime.now().isoformat()
-    with open(CONNECTION_STATUS_FILE, 'w') as f:
-        json.dump(status_data, f, indent=2)
-
-def get_connection_status():
-    """Get current connection status from file"""
-    ensure_status_dir()
-    if os.path.exists(CONNECTION_STATUS_FILE):
-        try:
-            with open(CONNECTION_STATUS_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return None
-    return None
-
 @app.route('/')
 def index():
-    # Log startup
-    log_status("Web interface accessed")
+    wifi_ap_array = scan_wifi_networks()
+    config_hash = config_file_hash()
     
-    # Ensure static IP is set for AP mode
-    try:
-        ensure_ap_mode_ip()
-    except Exception as e:
-        log_status(f"Failed to ensure AP mode IP: {str(e)}", is_error=True)
-    
-    try:
-        wifi_ap_array = scan_wifi_networks()
-    except Exception as e:
-        log_status(f"WiFi scan failed: {str(e)}", is_error=True)
-        wifi_ap_array = []
-    
-    try:
-        config_hash = config_file_hash()
-    except Exception as e:
-        log_status(f"Failed to read config: {str(e)}", is_error=True)
-        config_hash = {'wpa_enabled': '0', 'wpa_key': '', 'ssl_enabled': '0', 'server_port': '80'}
-    
-    # Get last status for display
-    last_status = get_connection_status()
-
     return render_template('app.html', 
                          wifi_ap_array=wifi_ap_array, 
-                         config_hash=config_hash,
-                         last_status=last_status)
-
-@app.route('/status')
-def status_page():
-    """Status page showing system information"""
-    status_info = {
-        'last_error': None,
-        'last_success': None,
-        'connection_status': get_connection_status(),
-        'config_log': []
-    }
-    
-    # Read last error
-    if os.path.exists(LAST_ERROR_FILE):
-        try:
-            with open(LAST_ERROR_FILE, 'r') as f:
-                status_info['last_error'] = f.read().strip()
-        except:
-            pass
-    
-    # Read last success
-    if os.path.exists(LAST_SUCCESS_FILE):
-        try:
-            with open(LAST_SUCCESS_FILE, 'r') as f:
-                status_info['last_success'] = f.read().strip()
-        except:
-            pass
-    
-    # Read recent config log entries (last 20 lines)
-    if os.path.exists(CONFIG_LOG_FILE):
-        try:
-            with open(CONFIG_LOG_FILE, 'r') as f:
-                lines = f.readlines()
-                status_info['config_log'] = [line.strip() for line in lines[-20:]]
-        except:
-            pass
-    
-    return render_template('status.html', status_info=status_info)
-
-@app.route('/api/status')
-def api_status():
-    """API endpoint for status information"""
-    return jsonify({
-        'connection_status': get_connection_status(),
-        'ap_mode': os.path.exists('/etc/raspiwifi/host_mode'),
-        'timestamp': datetime.now().isoformat()
-    })
+                         config_hash=config_hash)
 
 @app.route('/manual_ssid_entry')
 def manual_ssid_entry():
@@ -145,71 +32,18 @@ def wpa_settings():
 def save_credentials():
     ssid = request.form['ssid']
     wifi_key = request.form['wifi_key']
+
+    # Create wpa_supplicant.conf
+    create_wpa_supplicant(ssid, wifi_key)
     
-    log_status(f"Starting WiFi configuration for SSID: {ssid}")
+    # Call transition to client mode in a thread
+    def sleep_and_transition():
+        time.sleep(3)
+        transition_to_client_mode_with_status(ssid)
+    t = Thread(target=sleep_and_transition)
+    t.start()
 
-    try:
-        # Create a flag file to prevent reset.py from interfering
-        os.system('touch /tmp/raspiwifi_configuring')
-        log_status("Created configuration lock file")
-        
-        # Create wpa_supplicant.conf and verify it was created successfully
-        create_wpa_supplicant(ssid, wifi_key)
-        log_status("wpa_supplicant.conf created successfully")
-        
-        # Also create NetworkManager connection for redundancy and compatibility
-        nm_success = create_networkmanager_connection(ssid, wifi_key)
-        if nm_success:
-            log_status("NetworkManager connection created successfully")
-            # Clean up any old conflicting connections
-            cleanup_old_network_connections()
-        else:
-            log_status("NetworkManager connection creation failed (non-critical)", is_error=False)
-        
-        # Double-check the file exists before proceeding
-        if not os.path.exists('/etc/wpa_supplicant/wpa_supplicant.conf'):
-            raise Exception("wpa_supplicant.conf was not created successfully")
-        
-        # Stop any conflicting services immediately
-        os.system('systemctl stop hostapd')
-        os.system('systemctl stop dnsmasq')
-        log_status("Stopped AP mode services")
-        
-        # Update connection status
-        update_connection_status({
-            'state': 'configuring',
-            'ssid': ssid,
-            'message': 'WiFi credentials saved, transitioning to client mode...'
-        })
-        
-        # Call transition to client mode in a thread with a longer delay
-        def sleep_and_transition():
-            time.sleep(8)  # Longer delay to ensure all file operations complete
-            log_status("Starting transition to client mode")
-            # Remove the flag file
-            os.system('rm -f /tmp/raspiwifi_configuring')
-            # Use the new transition function instead of set_ap_client_mode
-            transition_to_client_mode_with_status(ssid)
-        t = Thread(target=sleep_and_transition)
-        t.start()
-
-        return render_template('save_credentials.html', ssid = ssid)
-        
-    except Exception as e:
-        error_msg = f"Failed to save WiFi credentials for {ssid}: {str(e)}"
-        log_status(error_msg, is_error=True)
-        
-        # Update connection status
-        update_connection_status({
-            'state': 'error',
-            'ssid': ssid,
-            'message': error_msg
-        })
-        
-        # Remove flag file on error
-        os.system('rm -f /tmp/raspiwifi_configuring')
-        # Return error page if file creation failed
-        return render_template('save_credentials.html', ssid = ssid, error = str(e))
+    return render_template('save_credentials.html', ssid = ssid)
 
 
 @app.route('/save_wpa_credentials', methods = ['GET', 'POST'])
@@ -243,22 +77,17 @@ def save_wpa_credentials():
 ######## FUNCTIONS ##########
 
 def scan_wifi_networks():
-    try:
-        iwlist_raw = subprocess.Popen(['iwlist', 'scan'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        ap_list, err = iwlist_raw.communicate()
-        ap_array = []
+    iwlist_raw = subprocess.Popen(['iwlist', 'scan'], stdout=subprocess.PIPE)
+    ap_list, err = iwlist_raw.communicate()
+    ap_array = []
 
-        for line in ap_list.decode('utf-8').rsplit('\n'):
-            if 'ESSID' in line:
-                ap_ssid = line[27:-1]
-                if ap_ssid != '':
-                    ap_array.append(ap_ssid)
+    for line in ap_list.decode('utf-8').rsplit('\n'):
+        if 'ESSID' in line:
+            ap_ssid = line[27:-1]
+            if ap_ssid != '':
+                ap_array.append(ap_ssid)
 
-        return ap_array
-    except Exception as e:
-        # Return empty array if wifi scanning fails (e.g., no wireless interface)
-        log_status(f"WiFi scan failed: {str(e)}", is_error=False)
-        return []
+    return ap_array
 
 def create_wpa_supplicant(ssid, wifi_key):
     # Use /tmp directory for temporary file to ensure write permissions
@@ -278,21 +107,21 @@ def create_wpa_supplicant(ssid, wifi_key):
         temp_conf_file.write('ap_scan=1\n')  # Enable AP scanning
         temp_conf_file.write('\n')
         temp_conf_file.write('network={\n')
-        temp_conf_file.write('	ssid="' + ssid + '"\n')
+        temp_conf_file.write('    ssid="' + ssid + '"\n')
 
         if wifi_key == '':
-            temp_conf_file.write('	key_mgmt=NONE\n')
+            temp_conf_file.write('    key_mgmt=NONE\n')
         else:
             # Use plain text password for better compatibility and simplicity
-            temp_conf_file.write('	psk="' + wifi_key + '"\n')
-            temp_conf_file.write('	key_mgmt=WPA-PSK\n')
-            temp_conf_file.write('	proto=RSN WPA\n')  # Support both WPA and WPA2
-            temp_conf_file.write('	pairwise=CCMP TKIP\n')  # Support both encryption types
-            temp_conf_file.write('	group=CCMP TKIP\n')
-            temp_conf_file.write('	scan_ssid=1\n')  # Allow hidden networks
+            temp_conf_file.write('    psk="' + wifi_key + '"\n')
+            temp_conf_file.write('    key_mgmt=WPA-PSK\n')
+            temp_conf_file.write('    proto=RSN WPA\n')  # Support both WPA and WPA2
+            temp_conf_file.write('    pairwise=CCMP TKIP\n')  # Support both encryption types
+            temp_conf_file.write('    group=CCMP TKIP\n')
+            temp_conf_file.write('    scan_ssid=1\n')  # Allow hidden networks
 
-        temp_conf_file.write('	priority=1\n')  # Give this network highest priority
-        temp_conf_file.write('	}\n')
+        temp_conf_file.write('    priority=1\n')  # Give this network highest priority
+        temp_conf_file.write('    }\n')
 
         # Ensure data is written to disk
         temp_conf_file.flush()
@@ -447,236 +276,141 @@ def ensure_ap_mode_ip():
         os.system('systemctl restart dhcpcd 2>/dev/null')
 
 def transition_to_client_mode_with_status(ssid):
-    """Improved transition to client mode with detailed status tracking"""
+    """Transition to client mode"""
     
-    log_status("Starting transition to client mode...")
-    update_connection_status({
-        'state': 'transitioning',
-        'ssid': ssid,
-        'message': 'Stopping AP mode services...'
-    })
-    
-    # Stop all potentially conflicting network services
+    # Stop AP mode services
     os.system('systemctl stop hostapd')
     os.system('systemctl stop dnsmasq') 
     os.system('systemctl disable hostapd')
     os.system('systemctl disable dnsmasq')
-    os.system('systemctl stop NetworkManager 2>/dev/null')
     
-    log_status("Stopped AP mode services")
-    
-    # Don't clear NetworkManager connections since we just created one
-    # Instead, let NetworkManager and wpa_supplicant work together
-    
-    # Remove static IP configuration for wlan0 to allow DHCP
-    update_connection_status({
-        'state': 'transitioning',
-        'ssid': ssid,
-        'message': 'Configuring network interface...'
-    })
-    
+    # Reset network interface
     os.system('ip addr flush dev wlan0')
     os.system('ip link set wlan0 down')
     time.sleep(2)
     os.system('ip link set wlan0 up')
     time.sleep(3)
     
-    # Restart NetworkManager early so it can work alongside wpa_supplicant
-    log_status("Starting NetworkManager for connection management...")
-    os.system('systemctl unmask NetworkManager')
-    os.system('systemctl enable NetworkManager')
-    os.system('systemctl start NetworkManager')
-    time.sleep(5)  # Give NetworkManager time to start
-    
-    # Kill any existing wpa_supplicant processes
+    # Start wpa_supplicant
     os.system('killall wpa_supplicant 2>/dev/null')
     time.sleep(2)
-    
-    # Start wpa_supplicant with explicit driver and interface
-    log_status("Starting wpa_supplicant...")
-    update_connection_status({
-        'state': 'connecting',
-        'ssid': ssid,
-        'message': 'Starting WiFi connection process...'
-    })
-    
     os.system('systemctl stop wpa_supplicant 2>/dev/null')
     
-    # Start wpa_supplicant manually with proper driver
-    wpa_cmd = 'wpa_supplicant -B -i wlan0 -D nl80211,wext -c /etc/wpa_supplicant/wpa_supplicant.conf'
-    result = os.system(wpa_cmd)
+    # Restart wpa_supplicant service
+    log_status("Restarting wpa_supplicant service...")
+    os.system('systemctl unmask wpa_supplicant')
+    os.system('systemctl enable wpa_supplicant')
+    os.system('systemctl restart wpa_supplicant')
     time.sleep(3)
-    
-    # Check if wpa_supplicant started successfully
-    wpa_running = os.system('pgrep wpa_supplicant > /dev/null') == 0
-    
+    wpa_running = os.system('systemctl is-active wpa_supplicant > /dev/null') == 0
+
     if not wpa_running:
         log_status("First wpa_supplicant attempt failed, trying alternative driver...")
         os.system('wpa_supplicant -B -i wlan0 -D wext -c /etc/wpa_supplicant/wpa_supplicant.conf')
         time.sleep(3)
         wpa_running = os.system('pgrep wpa_supplicant > /dev/null') == 0
+
+    # Restart NetworkManager to handle connection alongside wpa_supplicant
+    log_status("Restarting NetworkManager to handle connection...")
+    os.system('systemctl unmask NetworkManager')
+    os.system('systemctl enable NetworkManager') 
+    os.system('systemctl restart NetworkManager')
     
     if wpa_running:
         log_status("wpa_supplicant started successfully")
-        
-        # Force wpa_supplicant to reconfigure and connect
-        update_connection_status({
-            'state': 'connecting',
-            'ssid': ssid,
-            'message': 'Attempting WiFi connection...'
-        })
-        
         os.system('wpa_cli -i wlan0 reconfigure')
         time.sleep(3)
         os.system('wpa_cli -i wlan0 reassociate')
         time.sleep(5)
-        
-        # Trigger a fresh scan
         os.system('wpa_cli -i wlan0 scan')
         time.sleep(5)
+    else:
+        log_status("Failed to start wpa_supplicant, relying on NetworkManager", is_error=True)
+
+    update_connection_status({
+        'state': 'connecting',
+        'ssid': ssid,
+        'message': 'Attempting WiFi connection...'
+    })
+
+    # Wait for connection attempt with multiple checks
+    log_status("Waiting for WiFi connection...")
+    max_attempts = 6
+    connected = False
+    
+    for attempt in range(max_attempts):
+        time.sleep(5)
         
-        # Wait for connection attempt with multiple checks
-        log_status("Waiting for WiFi connection...")
-        max_attempts = 6
-        connected = False
-        
-        for attempt in range(max_attempts):
-            time.sleep(5)
-            
-            # Check wpa_supplicant connection
+        # Check wpa_supplicant connection if it's running
+        if wpa_running:
             wpa_result = os.system('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED" > /dev/null')
-            
-            # Also try NetworkManager connection if wpa_supplicant isn't connecting
-            if wpa_result != 0 and attempt >= 2:
-                log_status(f"Attempt {attempt + 1}: Trying NetworkManager connection...")
-                nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
-                if nm_result == 0:
-                    log_status("NetworkManager connection successful!")
-                    connected = True
-                    break
-            
             if wpa_result == 0:
+                log_status("wpa_supplicant connection successful!")
                 connected = True
                 break
-            else:
-                log_status(f"Connection attempt {attempt + 1}/{max_attempts} failed, retrying...")
-                # Force reconnection attempt
-                os.system('wpa_cli -i wlan0 reassociate')
-        
-        if connected:
-            log_status("WiFi connected successfully!")
-            update_connection_status({
-                'state': 'connected',
-                'ssid': ssid,
-                'message': 'WiFi connected! Requesting IP address...'
-            })
-            
-            # Request DHCP lease for the WiFi connection
-            os.system('dhclient -r wlan0 2>/dev/null')  # Release any existing lease
-            os.system('dhclient wlan0')
-            time.sleep(5)
-            
-            # Verify we got an IP address
-            ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
-            if ip_result == 0:
-                log_status("IP address obtained successfully")
-                
-                # Test internet connectivity
-                ping_result = os.system('ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1')
-                if ping_result == 0:
-                    update_connection_status({
-                        'state': 'online',
-                        'ssid': ssid,
-                        'message': 'Successfully connected to WiFi with internet access!'
-                    })
-                    log_status("Internet connectivity confirmed - setup complete!")
-                else:
-                    update_connection_status({
-                        'state': 'connected_no_internet',
-                        'ssid': ssid,
-                        'message': 'Connected to WiFi but no internet access detected'
-                    })
-                    log_status("Connected to WiFi but no internet access")
-            else:
-                log_status("Failed to obtain IP address")
-                update_connection_status({
-                    'state': 'connected_no_ip',
-                    'ssid': ssid,
-                    'message': 'Connected to WiFi but failed to get IP address'
-                })
-        else:
-            log_status("WiFi connection failed after all attempts", is_error=True)
-            update_connection_status({
-                'state': 'connection_failed',
-                'ssid': ssid,
-                'message': f'Failed to connect to WiFi network {ssid}'
-            })
-            
-            # Try fallback method with NetworkManager
-            log_status("Trying NetworkManager fallback connection method...")
-            
-            # Enable and start NetworkManager for fallback
-            os.system('systemctl unmask NetworkManager')
-            os.system('systemctl enable NetworkManager')
-            os.system('systemctl start NetworkManager')
-            time.sleep(10)  # Give NetworkManager time to start and detect connections
-            
-            # Try to activate the NetworkManager connection we created
-            safe_ssid = ssid.replace(' ', '_').replace('/', '_').replace('\\', '_')
-            nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
-            if nm_result == 0:
-                log_status("NetworkManager fallback connection successful!")
-                update_connection_status({
-                    'state': 'connected',
-                    'ssid': ssid,
-                    'message': 'Connected via NetworkManager fallback'
-                })
-            else:
-                log_status("NetworkManager fallback also failed", is_error=True)
-                # Try legacy wpa_supplicant as last resort
-                os.system('killall wpa_supplicant 2>/dev/null')
-                time.sleep(2)
-                os.system('systemctl start wpa_supplicant')
-                time.sleep(10)
-                os.system('dhclient wlan0')
-                time.sleep(5)
-    else:
-        error_msg = "Failed to start wpa_supplicant"
-        log_status(error_msg, is_error=True)
-        update_connection_status({
-            'state': 'wpa_failed',
-            'ssid': ssid,
-            'message': f'{error_msg}, trying NetworkManager...'
-        })
-        
-        # If wpa_supplicant fails completely, try NetworkManager immediately
-        log_status("wpa_supplicant failed, trying NetworkManager...")
-        os.system('systemctl unmask NetworkManager')
-        os.system('systemctl enable NetworkManager') 
-        os.system('systemctl start NetworkManager')
-        time.sleep(10)
-        
-        # Try to connect via NetworkManager
+
+        # Try NetworkManager connection
+        log_status(f"Attempt {attempt + 1}: Trying NetworkManager connection...")
         nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
         if nm_result == 0:
-            log_status("NetworkManager connection successful after wpa_supplicant failure!")
-            update_connection_status({
-                'state': 'connected',
-                'ssid': ssid,
-                'message': 'Connected via NetworkManager after wpa_supplicant failure'
-            })
+            log_status("NetworkManager connection successful!")
+            connected = True
+            break
+        
+        if not wpa_running:
+             log_status(f"Connection attempt {attempt + 1}/{max_attempts} failed, retrying...")
+        elif wpa_running:
+            log_status(f"Connection attempt {attempt + 1}/{max_attempts} failed, retrying with both...")
+            os.system('wpa_cli -i wlan0 reassociate')
+
+    if connected:
+        log_status("WiFi connected successfully!")
+        update_connection_status({
+            'state': 'connected',
+            'ssid': ssid,
+            'message': 'WiFi connected! Requesting IP address...'
+        })
+        
+        # Request DHCP lease for the WiFi connection
+        os.system('dhclient -r wlan0 2>/dev/null')  # Release any existing lease
+        os.system('dhclient wlan0')
+        time.sleep(5)
+        
+        # Verify we got an IP address
+        ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+        if ip_result == 0:
+            log_status("IP address obtained successfully")
+            
+            # Test internet connectivity
+            ping_result = os.system('ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1')
+            if ping_result == 0:
+                update_connection_status({
+                    'state': 'online',
+                    'ssid': ssid,
+                    'message': 'Successfully connected to WiFi with internet access!'
+                })
+                log_status("Internet connectivity confirmed - setup complete!")
+            else:
+                update_connection_status({
+                    'state': 'connected_no_internet',
+                    'ssid': ssid,
+                    'message': 'Connected to WiFi but no internet access detected'
+                })
+                log_status("Connected to WiFi but no internet access")
         else:
-            log_status("NetworkManager also failed to connect", is_error=True)
-    
-    # NetworkManager should already be running from earlier, but ensure it's active
-    nm_active = os.system('systemctl is-active NetworkManager > /dev/null') == 0
-    if not nm_active:
-        log_status("NetworkManager not active, restarting...")
-        os.system('systemctl unmask NetworkManager')
-        os.system('systemctl enable NetworkManager')
-        os.system('systemctl start NetworkManager')
+            log_status("Failed to obtain IP address")
+            update_connection_status({
+                'state': 'connected_no_ip',
+                'ssid': ssid,
+                'message': 'Connected to WiFi but failed to get IP address'
+            })
     else:
-        log_status("NetworkManager is active and ready")
+        log_status("WiFi connection failed after all attempts", is_error=True)
+        update_connection_status({
+            'state': 'connection_failed',
+            'ssid': ssid,
+            'message': f'Failed to connect to WiFi network {ssid}'
+        })
     
     # Final status check
     final_check()
@@ -911,33 +645,26 @@ def cleanup_old_network_connections():
         log_status(f"Error cleaning up old connections: {str(e)}")
         return False
 
-if __name__ == '__main__':
-    # Ensure static IP is set when app starts
-    try:
-        ensure_ap_mode_ip()
-    except Exception as e:
-        print(f"Warning: Failed to ensure AP mode IP: {str(e)}")
-        log_status(f"Failed to ensure AP mode IP during startup: {str(e)}", is_error=True)
+def log_status(message, is_error=False):
+    """Log status messages to a file for debugging"""
+    log_file = '/tmp/raspiwifi_status.log'
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = f'[{timestamp}] {"ERROR: " if is_error else ""} {message}\n'
     
-    try:
-        config_hash = config_file_hash()
-    except Exception as e:
-        print(f"Warning: Failed to read config, using defaults: {str(e)}")
-        log_status(f"Failed to read config during startup: {str(e)}", is_error=True)
-        config_hash = {'ssl_enabled': '0', 'server_port': '80'}
+    with open(log_file, 'a') as f:
+        f.write(log_entry)
+    print(log_entry)
 
-    try:
-        if config_hash.get('ssl_enabled') == "1":
-            app.run(host = '0.0.0.0', port = int(config_hash.get('server_port', 80)), ssl_context='adhoc')
-        else:
-            app.run(host = '0.0.0.0', port = int(config_hash.get('server_port', 80)))
-    except Exception as e:
-        print(f"Fatal: Flask app failed to start: {str(e)}")
-        log_status(f"Flask app failed to start: {str(e)}", is_error=True)
-        # Try to start with minimal configuration
-        try:
-            print("Attempting to start Flask with minimal configuration on port 80...")
-            app.run(host = '0.0.0.0', port = 80, debug=True)
-        except Exception as e2:
-            print(f"Fatal: Even minimal Flask startup failed: {str(e2)}")
-            exit(1)
+def update_connection_status(status):
+    """Update the connection status in a JSON file"""
+    status_file = '/tmp/connection_status.json'
+    with open(status_file, 'w') as f:
+        json.dump(status, f)
+
+if __name__ == '__main__':
+    config_hash = config_file_hash()
+
+    if config_hash['ssl_enabled'] == "1":
+        app.run(host = '0.0.0.0', port = int(config_hash['server_port']), ssl_context='adhoc')
+    else:
+        app.run(host = '0.0.0.0', port = int(config_hash['server_port']))
