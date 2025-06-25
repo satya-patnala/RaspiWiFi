@@ -36,6 +36,9 @@ def save_credentials():
     # Create wpa_supplicant.conf
     create_wpa_supplicant(ssid, wifi_key)
     
+    # Create NetworkManager connection
+    create_networkmanager_connection(ssid, wifi_key)
+    
     # Call transition to client mode in a thread
     def sleep_and_transition():
         time.sleep(3)
@@ -135,7 +138,6 @@ def create_wpa_supplicant(ssid, wifi_key):
         # Stop wpa_supplicant completely before replacing config
         os.system('systemctl stop wpa_supplicant')
         os.system('killall wpa_supplicant 2>/dev/null')
-        time.sleep(2)
 
         # Move the file and set proper permissions
         move_result = os.system('mv ' + temp_file_path + ' /etc/wpa_supplicant/wpa_supplicant.conf')
@@ -287,130 +289,122 @@ def transition_to_client_mode_with_status(ssid):
     # Reset network interface
     os.system('ip addr flush dev wlan0')
     os.system('ip link set wlan0 down')
-    time.sleep(2)
     os.system('ip link set wlan0 up')
-    time.sleep(3)
     
-    # Start wpa_supplicant
+    # Stop any existing wpa_supplicant processes
     os.system('killall wpa_supplicant 2>/dev/null')
-    time.sleep(2)
     os.system('systemctl stop wpa_supplicant 2>/dev/null')
     
-    # Restart wpa_supplicant service
-    log_status("Restarting wpa_supplicant service...")
-    os.system('systemctl unmask wpa_supplicant')
-    os.system('systemctl enable wpa_supplicant')
-    os.system('systemctl restart wpa_supplicant')
-    time.sleep(3)
-    wpa_running = os.system('systemctl is-active wpa_supplicant > /dev/null') == 0
-
-    if not wpa_running:
-        log_status("First wpa_supplicant attempt failed, trying alternative driver...")
-        os.system('wpa_supplicant -B -i wlan0 -D wext -c /etc/wpa_supplicant/wpa_supplicant.conf')
-        time.sleep(3)
-        wpa_running = os.system('pgrep wpa_supplicant > /dev/null') == 0
-
-    # Restart NetworkManager to handle connection alongside wpa_supplicant
-    log_status("Restarting NetworkManager to handle connection...")
+    # Configure dhcpcd for client mode
+    log_status("Configuring dhcpcd for client mode...")
+    os.system('cp /etc/dhcpcd.conf.original /etc/dhcpcd.conf 2>/dev/null || echo "# dhcpcd config for client mode" > /etc/dhcpcd.conf')
+    os.system('systemctl restart dhcpcd')
+    
+    # Start NetworkManager first and let it handle the connection
+    log_status("Starting NetworkManager to handle WiFi connection...")
     os.system('systemctl unmask NetworkManager')
     os.system('systemctl enable NetworkManager') 
     os.system('systemctl restart NetworkManager')
     
-    if wpa_running:
-        log_status("wpa_supplicant started successfully")
-        os.system('wpa_cli -i wlan0 reconfigure')
-        time.sleep(3)
-        os.system('wpa_cli -i wlan0 reassociate')
-        time.sleep(5)
-        os.system('wpa_cli -i wlan0 scan')
-        time.sleep(5)
-    else:
-        log_status("Failed to start wpa_supplicant, relying on NetworkManager", is_error=True)
-
-    update_connection_status({
-        'state': 'connecting',
-        'ssid': ssid,
-        'message': 'Attempting WiFi connection...'
-    })
-
-    # Wait for connection attempt with multiple checks
-    log_status("Waiting for WiFi connection...")
-    max_attempts = 6
-    connected = False
+    # Wait for NetworkManager to start
+    time.sleep(5)
     
-    for attempt in range(max_attempts):
-        time.sleep(5)
+    nm_running = os.system('systemctl is-active NetworkManager > /dev/null') == 0
+    log_status(f"NetworkManager status: {'running' if nm_running else 'failed'}")
+    
+    if nm_running:
+        # Try NetworkManager connection first
+        update_connection_status({
+            'state': 'connecting',
+            'ssid': ssid,
+            'message': 'Attempting WiFi connection via NetworkManager...'
+        })
         
-        # Check wpa_supplicant connection if it's running
-        if wpa_running:
-            wpa_result = os.system('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED" > /dev/null')
-            if wpa_result == 0:
-                log_status("wpa_supplicant connection successful!")
-                connected = True
-                break
-
-        # Try NetworkManager connection
-        log_status(f"Attempt {attempt + 1}: Trying NetworkManager connection...")
-        nm_result = os.system(f'nmcli connection up "{ssid}" 2>/dev/null')
+        log_status("Attempting NetworkManager connection...")
+        nm_result = os.system(f'nmcli device wifi connect "{ssid}" 2>/dev/null')
         if nm_result == 0:
             log_status("NetworkManager connection successful!")
-            connected = True
-            break
+            time.sleep(3)
+            # Check if we got IP
+            ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+            if ip_result == 0:
+                log_status("IP address obtained via NetworkManager!")
+                update_connection_status({
+                    'state': 'connected',
+                    'ssid': ssid,
+                    'message': 'Connected via NetworkManager'
+                })
+                final_check()
+                return
+    
+    # If NetworkManager failed, try wpa_supplicant as fallback
+    log_status("NetworkManager connection failed, trying wpa_supplicant fallback...")
+    
+    # Stop NetworkManager to avoid conflicts
+    os.system('systemctl stop NetworkManager')
+    
+    # Start wpa_supplicant manually with specific config
+    log_status("Starting wpa_supplicant manually...")
+    wpa_cmd = 'wpa_supplicant -B -i wlan0 -D nl80211,wext -c /etc/wpa_supplicant/wpa_supplicant.conf'
+    wpa_result = os.system(wpa_cmd)
+    
+    if wpa_result == 0:
+        time.sleep(3)
+        wpa_running = os.system('pgrep wpa_supplicant > /dev/null') == 0
         
-        if not wpa_running:
-             log_status(f"Connection attempt {attempt + 1}/{max_attempts} failed, retrying...")
-        elif wpa_running:
-            log_status(f"Connection attempt {attempt + 1}/{max_attempts} failed, retrying with both...")
+        if wpa_running:
+            log_status("wpa_supplicant started successfully, triggering connection...")
+            os.system('wpa_cli -i wlan0 reconfigure')
             os.system('wpa_cli -i wlan0 reassociate')
-
-    if connected:
-        log_status("WiFi connected successfully!")
-        update_connection_status({
-            'state': 'connected',
-            'ssid': ssid,
-            'message': 'WiFi connected! Requesting IP address...'
-        })
-        
-        # Request DHCP lease for the WiFi connection
-        os.system('dhclient -r wlan0 2>/dev/null')  # Release any existing lease
-        os.system('dhclient wlan0')
-        time.sleep(5)
-        
-        # Verify we got an IP address
-        ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
-        if ip_result == 0:
-            log_status("IP address obtained successfully")
             
-            # Test internet connectivity
-            ping_result = os.system('ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1')
-            if ping_result == 0:
-                update_connection_status({
-                    'state': 'online',
-                    'ssid': ssid,
-                    'message': 'Successfully connected to WiFi with internet access!'
-                })
-                log_status("Internet connectivity confirmed - setup complete!")
-            else:
-                update_connection_status({
-                    'state': 'connected_no_internet',
-                    'ssid': ssid,
-                    'message': 'Connected to WiFi but no internet access detected'
-                })
-                log_status("Connected to WiFi but no internet access")
-        else:
-            log_status("Failed to obtain IP address")
             update_connection_status({
-                'state': 'connected_no_ip',
+                'state': 'connecting',
                 'ssid': ssid,
-                'message': 'Connected to WiFi but failed to get IP address'
+                'message': 'Attempting WiFi connection via wpa_supplicant...'
             })
+            
+            # Wait for connection and check for IP
+            max_attempts = 8
+            connected = False
+            
+            for attempt in range(max_attempts):
+                time.sleep(3)
+                
+                # Check if we have an IP address
+                ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+                if ip_result == 0:
+                    log_status("Connection successful - IP address obtained!")
+                    connected = True
+                    break
+                
+                # Check wpa_supplicant status
+                wpa_status = os.system('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED" > /dev/null')
+                if wpa_status == 0:
+                    log_status("wpa_supplicant connected, requesting IP...")
+                    os.system('dhclient wlan0 2>/dev/null')
+                    time.sleep(2)
+                    continue
+                
+                log_status(f"Connection attempt {attempt + 1}/{max_attempts}...")
+                os.system('wpa_cli -i wlan0 reassociate')
+            
+            if connected:
+                update_connection_status({
+                    'state': 'connected',
+                    'ssid': ssid,
+                    'message': 'Connected via wpa_supplicant'
+                })
+            else:
+                log_status("wpa_supplicant connection failed", is_error=True)
+                update_connection_status({
+                    'state': 'connection_failed',
+                    'ssid': ssid,
+                    'message': f'Failed to connect to WiFi network {ssid}'
+                })
+        else:
+            log_status("Failed to start wpa_supplicant", is_error=True)
     else:
-        log_status("WiFi connection failed after all attempts", is_error=True)
-        update_connection_status({
-            'state': 'connection_failed',
-            'ssid': ssid,
-            'message': f'Failed to connect to WiFi network {ssid}'
-        })
+        log_status("wpa_supplicant command failed", is_error=True)
     
     # Final status check
     final_check()
@@ -564,7 +558,6 @@ def create_networkmanager_connection(ssid, wifi_key):
             f.write('[wifi]\n')
             f.write(f'ssid={ssid}\n')
             f.write('mode=infrastructure\n')
-            f.write('hidden=false\n')
             f.write('\n')
             
             if wifi_key == '':
@@ -575,7 +568,6 @@ def create_networkmanager_connection(ssid, wifi_key):
                 # WPA/WPA2 network
                 f.write('[wifi-security]\n')
                 f.write('key-mgmt=wpa-psk\n')
-                f.write('auth-alg=open\n')
                 f.write(f'psk={wifi_key}\n')
             
             f.write('\n')
