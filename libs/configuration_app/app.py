@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 import os
 import time
+import subprocess
 from threading import Thread
 import fileinput
 import json
@@ -59,10 +60,22 @@ def index():
     log_status("Web interface accessed")
     
     # Ensure static IP is set for AP mode
-    ensure_ap_mode_ip()
+    try:
+        ensure_ap_mode_ip()
+    except Exception as e:
+        log_status(f"Failed to ensure AP mode IP: {str(e)}", is_error=True)
     
-    wifi_ap_array = scan_wifi_networks()
-    config_hash = config_file_hash()
+    try:
+        wifi_ap_array = scan_wifi_networks()
+    except Exception as e:
+        log_status(f"WiFi scan failed: {str(e)}", is_error=True)
+        wifi_ap_array = []
+    
+    try:
+        config_hash = config_file_hash()
+    except Exception as e:
+        log_status(f"Failed to read config: {str(e)}", is_error=True)
+        config_hash = {'wpa_enabled': '0', 'wpa_key': '', 'ssl_enabled': '0', 'server_port': '80'}
     
     # Get last status for display
     last_status = get_connection_status()
@@ -230,17 +243,22 @@ def save_wpa_credentials():
 ######## FUNCTIONS ##########
 
 def scan_wifi_networks():
-    iwlist_raw = subprocess.Popen(['iwlist', 'scan'], stdout=subprocess.PIPE)
-    ap_list, err = iwlist_raw.communicate()
-    ap_array = []
+    try:
+        iwlist_raw = subprocess.Popen(['iwlist', 'scan'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ap_list, err = iwlist_raw.communicate()
+        ap_array = []
 
-    for line in ap_list.decode('utf-8').rsplit('\n'):
-        if 'ESSID' in line:
-            ap_ssid = line[27:-1]
-            if ap_ssid != '':
-                ap_array.append(ap_ssid)
+        for line in ap_list.decode('utf-8').rsplit('\n'):
+            if 'ESSID' in line:
+                ap_ssid = line[27:-1]
+                if ap_ssid != '':
+                    ap_array.append(ap_ssid)
 
-    return ap_array
+        return ap_array
+    except Exception as e:
+        # Return empty array if wifi scanning fails (e.g., no wireless interface)
+        log_status(f"WiFi scan failed: {str(e)}", is_error=False)
+        return []
 
 def create_wpa_supplicant(ssid, wifi_key):
     # Use /tmp directory for temporary file to ensure write permissions
@@ -706,7 +724,6 @@ def debug_wifi_configs():
         debug_info.append("No NetworkManager connections found")
     
     # Check current WiFi connection
-    import subprocess
     try:
         result = subprocess.run(['iwconfig', 'wlan0'], capture_output=True, text=True)
         debug_info.append(f"Current wlan0 status:\n{result.stdout}")
@@ -896,11 +913,31 @@ def cleanup_old_network_connections():
 
 if __name__ == '__main__':
     # Ensure static IP is set when app starts
-    ensure_ap_mode_ip()
+    try:
+        ensure_ap_mode_ip()
+    except Exception as e:
+        print(f"Warning: Failed to ensure AP mode IP: {str(e)}")
+        log_status(f"Failed to ensure AP mode IP during startup: {str(e)}", is_error=True)
     
-    config_hash = config_file_hash()
+    try:
+        config_hash = config_file_hash()
+    except Exception as e:
+        print(f"Warning: Failed to read config, using defaults: {str(e)}")
+        log_status(f"Failed to read config during startup: {str(e)}", is_error=True)
+        config_hash = {'ssl_enabled': '0', 'server_port': '80'}
 
-    if config_hash['ssl_enabled'] == "1":
-        app.run(host = '0.0.0.0', port = int(config_hash['server_port']), ssl_context='adhoc')
-    else:
-        app.run(host = '0.0.0.0', port = int(config_hash['server_port']))
+    try:
+        if config_hash.get('ssl_enabled') == "1":
+            app.run(host = '0.0.0.0', port = int(config_hash.get('server_port', 80)), ssl_context='adhoc')
+        else:
+            app.run(host = '0.0.0.0', port = int(config_hash.get('server_port', 80)))
+    except Exception as e:
+        print(f"Fatal: Flask app failed to start: {str(e)}")
+        log_status(f"Flask app failed to start: {str(e)}", is_error=True)
+        # Try to start with minimal configuration
+        try:
+            print("Attempting to start Flask with minimal configuration on port 80...")
+            app.run(host = '0.0.0.0', port = 80, debug=True)
+        except Exception as e2:
+            print(f"Fatal: Even minimal Flask startup failed: {str(e2)}")
+            exit(1)
