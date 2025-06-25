@@ -1,4 +1,33 @@
 import os
+import subprocess
+
+def cleanup_old_network_connections():
+	"""
+	Remove all previously saved WiFi connections from NetworkManager
+	before initializing RaspiWiFi to prevent conflicts
+	"""
+	print("Cleaning up old NetworkManager WiFi connections...")
+	try:
+		# Get list of all NetworkManager connections
+		result = subprocess.run(['nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show'], 
+		                       capture_output=True, text=True)
+		
+		if result.returncode == 0:
+			connections = result.stdout.strip().split('\n')
+			for conn_line in connections:
+				if conn_line and ':802-11-wireless' in conn_line:
+					name = conn_line.split(':')[0]
+					if name:
+						print(f"Deleting NetworkManager WiFi connection: {name}")
+						subprocess.run(['nmcli', 'connection', 'delete', name], 
+						              capture_output=True)
+		
+		# Also remove connection files directly
+		os.system('rm -f /etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null')
+		print("Old WiFi connections cleaned up successfully")
+		
+	except Exception as e:
+		print(f"Warning: Error cleaning up old connections: {str(e)}")
 
 def install_prereqs():
 	os.system('clear')
@@ -53,6 +82,9 @@ def install_prereqs():
 	os.system('clear')
 
 def copy_configs(wpa_enabled_choice):
+	# Clean up old NetworkManager WiFi connections before setup
+	cleanup_old_network_connections()
+	
 	os.system('mkdir /usr/lib/raspiwifi')
 	os.system('mkdir /etc/raspiwifi')
 	os.system('cp -a libs/* /usr/lib/raspiwifi/')
