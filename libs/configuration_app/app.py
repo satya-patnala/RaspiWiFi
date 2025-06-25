@@ -125,12 +125,16 @@ def scan_wifi_networks():
     ap_array = []
 
     for line in ap_list.decode('utf-8', errors='replace').rsplit('\n'):
-        if 'ESSID' in line:
-            ap_ssid = line[27:-1]
-            if ap_ssid != '':
-                # Normalize the SSID for consistency
-                ap_ssid = normalize_ssid(ap_ssid)
-                ap_array.append(ap_ssid)
+        if 'ESSID' in line and 'ESSID:' in line:
+            # Extract everything after 'ESSID:' and remove quotes
+            essid_part = line.split('ESSID:', 1)[1].strip()
+            if essid_part and essid_part != '""':
+                # Remove surrounding quotes if present
+                ap_ssid = essid_part.strip('"')
+                if ap_ssid:
+                    # Normalize the SSID for consistency
+                    ap_ssid = normalize_ssid(ap_ssid)
+                    ap_array.append(ap_ssid)
 
     return ap_array
 
@@ -145,8 +149,8 @@ def create_wpa_supplicant(ssid, wifi_key):
         # Stop NetworkManager temporarily to prevent interference during configuration
         os.system('systemctl stop NetworkManager 2>/dev/null')
         
-        # Create the temporary file
-        temp_conf_file = open(temp_file_path, 'w')
+        # Create the temporary file with explicit UTF-8 encoding
+        temp_conf_file = open(temp_file_path, 'w', encoding='utf-8')
 
         # Write wpa_supplicant configuration with proper driver settings
         temp_conf_file.write('ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n')
@@ -155,13 +159,16 @@ def create_wpa_supplicant(ssid, wifi_key):
         temp_conf_file.write('ap_scan=1\n')  # Enable AP scanning
         temp_conf_file.write('\n')
         temp_conf_file.write('network={\n')
-        temp_conf_file.write('    ssid="' + ssid + '"\n')
+        # Properly escape SSID and password for wpa_supplicant config
+        escaped_ssid = ssid.replace('\\', '\\\\').replace('"', '\\"')
+        temp_conf_file.write(f'    ssid="{escaped_ssid}"\n')
 
         if wifi_key == '':
             temp_conf_file.write('    key_mgmt=NONE\n')
         else:
             # Use plain text password for better compatibility and simplicity
-            temp_conf_file.write('    psk="' + wifi_key + '"\n')
+            escaped_key = wifi_key.replace('\\', '\\\\').replace('"', '\\"')
+            temp_conf_file.write(f'    psk="{escaped_key}"\n')
             temp_conf_file.write('    key_mgmt=WPA-PSK\n')
             temp_conf_file.write('    proto=RSN WPA\n')  # Support both WPA and WPA2
             temp_conf_file.write('    pairwise=CCMP TKIP\n')  # Support both encryption types
@@ -184,10 +191,10 @@ def create_wpa_supplicant(ssid, wifi_key):
         os.system('systemctl stop wpa_supplicant')
         os.system('killall wpa_supplicant 2>/dev/null')
 
-        # Move the file and set proper permissions
-        move_result = os.system('mv ' + temp_file_path + ' /etc/wpa_supplicant/wpa_supplicant.conf')
-        if move_result != 0:
-            raise Exception("Failed to move wpa_supplicant.conf to /etc/wpa_supplicant/")
+        # Move the file and set proper permissions using subprocess for safety
+        move_result = subprocess.run(['mv', temp_file_path, '/etc/wpa_supplicant/wpa_supplicant.conf'], capture_output=True)
+        if move_result.returncode != 0:
+            raise Exception(f"Failed to move wpa_supplicant.conf to /etc/wpa_supplicant/: {move_result.stderr.decode()}")
             
         # Verify the final file was created
         if not os.path.exists('/etc/wpa_supplicant/wpa_supplicant.conf'):
@@ -276,14 +283,23 @@ def update_wpa(wpa_enabled, wpa_key):
 
 
 def config_file_hash():
-    config_file = open('/etc/raspiwifi/raspiwifi.conf')
     config_hash = {}
-
-    for line in config_file:
-        line_key = line.split("=")[0]
-        line_value = line.split("=")[1].rstrip()
-        config_hash[line_key] = line_value
-
+    try:
+        with open('/etc/raspiwifi/raspiwifi.conf', 'r') as config_file:
+            for line in config_file:
+                if '=' in line:
+                    line_key = line.split("=")[0]
+                    line_value = line.split("=")[1].rstrip()
+                    config_hash[line_key] = line_value
+    except (FileNotFoundError, IOError) as e:
+        print(f"Warning: Could not read config file: {e}")
+        # Return default values if config file is missing
+        config_hash = {
+            'ssl_enabled': '0',
+            'server_port': '80',
+            'wpa_enabled': '0',
+            'wpa_key': ''
+        }
     return config_hash
 
 def restart_network_interface():
@@ -378,10 +394,10 @@ def transition_to_client_mode_with_status(ssid):
         try:
             # Try with password if available
             if wifi_key and wifi_key.strip():
-                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', wifi_key]
+                cmd = ['nmcli', 'device', 'wifi', 'connect', f'"{ssid}"', 'password', f'"{wifi_key}"']
                 log_status("Connecting with password...")
             else:
-                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid]
+                cmd = ['nmcli', 'device', 'wifi', 'connect', f'"{ssid}"']
                 log_status("Connecting without password (open network)...")
                 
             log_status(f"Running command: {' '.join(['nmcli', 'device', 'wifi', 'connect', repr(ssid), '...'])}")
@@ -419,7 +435,7 @@ def transition_to_client_mode_with_status(ssid):
             # Try fallback method with connection profile
             log_status("Direct connection failed, trying connection profile method...")
             try:
-                result = subprocess.run(['nmcli', 'connection', 'up', ssid], 
+                result = subprocess.run(['nmcli', 'connection', 'up', f'"{ssid}"'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
                     log_status("Connection profile method successful!")
@@ -650,9 +666,11 @@ def create_networkmanager_connection(ssid, wifi_key):
         # Create temporary file first
         temp_file = f'/tmp/{connection_uuid}.nmconnection.tmp'
         
-        with open(temp_file, 'w') as f:
+        with open(temp_file, 'w', encoding='utf-8') as f:
             f.write('[connection]\n')
-            f.write(f'id={ssid}\n')
+            # Properly escape SSID for NetworkManager config
+            escaped_ssid = ssid.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r')
+            f.write(f'id="{escaped_ssid}"\n')
             f.write(f'uuid={connection_uuid}\n')
             f.write('type=wifi\n')
             f.write('autoconnect=true\n')
@@ -660,7 +678,7 @@ def create_networkmanager_connection(ssid, wifi_key):
             f.write('\n')
             
             f.write('[wifi]\n')
-            f.write(f'ssid={ssid}\n')
+            f.write(f'ssid="{escaped_ssid}"\n')
             f.write('mode=infrastructure\n')
             f.write('\n')
             
@@ -669,10 +687,11 @@ def create_networkmanager_connection(ssid, wifi_key):
                 f.write('[wifi-security]\n')
                 f.write('key-mgmt=none\n')
             else:
-                # WPA/WPA2 network
+                # WPA/WPA2 network - properly escape password
+                escaped_key = wifi_key.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r')
                 f.write('[wifi-security]\n')
                 f.write('key-mgmt=wpa-psk\n')
-                f.write(f'psk={wifi_key}\n')
+                f.write(f'psk="{escaped_key}"\n')
             
             f.write('\n')
             f.write('[ipv4]\n')
@@ -682,14 +701,14 @@ def create_networkmanager_connection(ssid, wifi_key):
             f.write('[ipv6]\n')
             f.write('method=auto\n')
             
-        # Move temp file to final location and set permissions
-        move_result = os.system(f'mv {temp_file} {connection_file}')
-        if move_result != 0:
-            raise Exception(f"Failed to create NetworkManager connection file: {connection_file}")
+        # Move temp file to final location and set permissions using subprocess for safety
+        move_result = subprocess.run(['mv', temp_file, connection_file], capture_output=True)
+        if move_result.returncode != 0:
+            raise Exception(f"Failed to create NetworkManager connection file: {connection_file}, error: {move_result.stderr.decode()}")
             
         # Set strict permissions (only root can read/write)
-        os.system(f'chmod 600 {connection_file}')
-        os.system(f'chown root:root {connection_file}')
+        subprocess.run(['chmod', '600', connection_file])
+        subprocess.run(['chown', 'root:root', connection_file])
         
         # Verify file was created
         if not os.path.exists(connection_file):
