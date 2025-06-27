@@ -85,10 +85,10 @@ def save_wpa_credentials():
     def sleep_and_restart_services():
         time.sleep(2)
         # Restart hostapd service to apply WPA changes
-        os.system('systemctl unmask hostapd')
-        os.system('systemctl unmask dnsmasq')
-        os.system('systemctl restart hostapd')
-        os.system('systemctl restart dnsmasq')
+        subprocess.run(['systemctl', 'unmask', 'hostapd'])
+        subprocess.run(['systemctl', 'unmask', 'dnsmasq'])
+        subprocess.run(['systemctl', 'restart', 'hostapd'])
+        subprocess.run(['systemctl', 'restart', 'dnsmasq'])
 
     t = Thread(target=sleep_and_restart_services)
     t.start()
@@ -151,7 +151,7 @@ def create_wpa_supplicant(ssid, wifi_key):
     
     try:
         # Stop NetworkManager temporarily to prevent interference during configuration
-        os.system('systemctl stop NetworkManager 2>/dev/null')
+        subprocess.run(['systemctl', 'stop', 'NetworkManager'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         # Create the temporary file with explicit UTF-8 encoding
         temp_conf_file = open(temp_file_path, 'w', encoding='utf-8')
@@ -192,8 +192,8 @@ def create_wpa_supplicant(ssid, wifi_key):
             raise Exception("Temporary file was not created")
 
         # Stop wpa_supplicant completely before replacing config
-        os.system('systemctl stop wpa_supplicant')
-        os.system('killall wpa_supplicant 2>/dev/null')
+        subprocess.run(['systemctl', 'stop', 'wpa_supplicant'])
+        subprocess.run(['killall', 'wpa_supplicant'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Move the file and set proper permissions using subprocess for safety
         move_result = subprocess.run(['mv', temp_file_path, '/etc/wpa_supplicant/wpa_supplicant.conf'], capture_output=True)
@@ -205,14 +205,14 @@ def create_wpa_supplicant(ssid, wifi_key):
             raise Exception("wpa_supplicant.conf was not created in /etc/wpa_supplicant/")
 
         # Set proper permissions (readable/writable by root only)
-        os.system('chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf')
+        subprocess.run(['chmod', '600', '/etc/wpa_supplicant/wpa_supplicant.conf'])
         
         # Unmask and enable wpa_supplicant service
-        os.system('systemctl unmask wpa_supplicant')
-        os.system('systemctl enable wpa_supplicant')
+        subprocess.run(['systemctl', 'unmask', 'wpa_supplicant'])
+        subprocess.run(['systemctl', 'enable', 'wpa_supplicant'])
         
         # Force filesystem sync to ensure all writes are completed
-        os.system('sync')
+        subprocess.run(['sync'])
         
         # Validate the file contents to ensure it's properly formatted
         try:
@@ -234,40 +234,40 @@ def create_wpa_supplicant(ssid, wifi_key):
         raise e
 
 def set_ap_client_mode():
-    os.system('rm -f /etc/raspiwifi/host_mode')
-    os.system('rm /etc/cron.raspiwifi/aphost_bootstrapper')
-    os.system('cp /usr/lib/raspiwifi/reset_device/static_files/apclient_bootstrapper /etc/cron.raspiwifi/')
-    os.system('chmod +x /etc/cron.raspiwifi/apclient_bootstrapper')
-    os.system('mv /etc/dnsmasq.conf.original /etc/dnsmasq.conf')
-    os.system('mv /etc/dhcpcd.conf.original /etc/dhcpcd.conf')
+    subprocess.run(['rm', '-f', '/etc/raspiwifi/host_mode'])
+    subprocess.run(['rm', '/etc/cron.raspiwifi/aphost_bootstrapper'])
+    subprocess.run(['cp', '/usr/lib/raspiwifi/reset_device/static_files/apclient_bootstrapper', '/etc/cron.raspiwifi/'])
+    subprocess.run(['chmod', '+x', '/etc/cron.raspiwifi/apclient_bootstrapper'])
+    subprocess.run(['mv', '/etc/dnsmasq.conf.original', '/etc/dnsmasq.conf'])
+    subprocess.run(['mv', '/etc/dhcpcd.conf.original', '/etc/dhcpcd.conf'])
     
     # Stop AP mode services
-    os.system('systemctl stop hostapd')
-    os.system('systemctl stop dnsmasq')
-    os.system('systemctl disable hostapd')
-    os.system('systemctl disable dnsmasq')
+    subprocess.run(['systemctl', 'stop', 'hostapd'])
+    subprocess.run(['systemctl', 'stop', 'dnsmasq'])
+    subprocess.run(['systemctl', 'disable', 'hostapd'])
+    subprocess.run(['systemctl', 'disable', 'dnsmasq'])
     
     # Restart network services for client mode
-    os.system('systemctl restart dhcpcd')
+    subprocess.run(['systemctl', 'restart', 'dhcpcd'])
     
     # Restart network interface to apply new configuration
     restart_network_interface()
     
     # Start and enable wpa_supplicant for WiFi client mode
-    os.system('systemctl start wpa_supplicant')
-    os.system('systemctl enable wpa_supplicant')
+    subprocess.run(['systemctl', 'start', 'wpa_supplicant'])
+    subprocess.run(['systemctl', 'enable', 'wpa_supplicant'])
     
     # Wait for connection to establish
     time.sleep(5)
     
     # Try to connect to the WiFi network
-    os.system('wpa_cli -i wlan0 reconfigure')
-    os.system('dhclient wlan0')
+    subprocess.run(['wpa_cli', '-i', 'wlan0', 'reconfigure'])
+    subprocess.run(['dhclient', 'wlan0'])
     
     # Optionally enable NetworkManager for GUI compatibility
     # This allows the WiFi icon in the desktop to work properly
-    os.system('systemctl enable NetworkManager')
-    os.system('systemctl start NetworkManager')
+    subprocess.run(['systemctl', 'enable', 'NetworkManager'])
+    subprocess.run(['systemctl', 'start', 'NetworkManager'])
 
 def update_wpa(wpa_enabled, wpa_key):
     with fileinput.FileInput('/etc/raspiwifi/raspiwifi.conf', inplace=True) as raspiwifi_conf:
@@ -308,39 +308,39 @@ def config_file_hash():
 
 def restart_network_interface():
     """Restart wlan0 interface to apply new network configuration"""
-    os.system('ip link set wlan0 down')
+    subprocess.run(['ip', 'link', 'set', 'wlan0', 'down'])
     time.sleep(1)
-    os.system('ip link set wlan0 up')
+    subprocess.run(['ip', 'link', 'set', 'wlan0', 'up'])
     time.sleep(2)
     
     # Restart networking to ensure configuration is applied
-    os.system('systemctl restart networking')
+    subprocess.run(['systemctl', 'restart', 'networking'])
 
 def ensure_ap_mode_ip():
     """Ensure wlan0 has static IP 10.0.0.1 when in AP mode"""
     # Check if we're in host mode (AP mode)
     if os.path.exists('/etc/raspiwifi/host_mode'):
         # Stop NetworkManager if it's running to avoid conflicts
-        os.system('systemctl stop NetworkManager 2>/dev/null')
+        subprocess.run(['systemctl', 'stop', 'NetworkManager'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         # Bring interface down and up to reset it
-        os.system('ip link set wlan0 down 2>/dev/null')
-        os.system('sleep 1')
-        os.system('ip link set wlan0 up')
-        os.system('sleep 1')
+        subprocess.run(['ip', 'link', 'set', 'wlan0', 'down'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
+        subprocess.run(['ip', 'link', 'set', 'wlan0', 'up'])
+        time.sleep(1)
         
         # Set static IP immediately for AP mode
-        os.system('ifconfig wlan0 10.0.0.1 netmask 255.255.255.0 up')
+        subprocess.run(['ifconfig', 'wlan0', '10.0.0.1', 'netmask', '255.255.255.0', 'up'])
         
         # Verify it worked
-        result = os.system('ifconfig wlan0 | grep "inet 10.0.0.1" > /dev/null 2>&1')
-        if result != 0:
+        result = subprocess.run('ifconfig wlan0 | grep "inet 10.0.0.1"', shell=True, capture_output=True)
+        if result.returncode != 0:
             # Try alternative method if first attempt failed
-            os.system('ip addr add 10.0.0.1/24 dev wlan0 2>/dev/null')
-            os.system('ip link set wlan0 up')
+            subprocess.run(['ip', 'addr', 'add', '10.0.0.1/24', 'dev', 'wlan0'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['ip', 'link', 'set', 'wlan0', 'up'])
         
         # Ensure dhcpcd is managing the interface properly
-        os.system('systemctl restart dhcpcd 2>/dev/null')
+        subprocess.run(['systemctl', 'restart', 'dhcpcd'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def transition_to_client_mode_with_status(ssid):
     """Transition to client mode"""
@@ -349,35 +349,35 @@ def transition_to_client_mode_with_status(ssid):
     ssid = normalize_ssid(ssid)
     
     # Stop AP mode services
-    os.system('systemctl stop hostapd')
-    os.system('systemctl stop dnsmasq') 
-    os.system('systemctl disable hostapd')
-    os.system('systemctl disable dnsmasq')
+    subprocess.run(['systemctl', 'stop', 'hostapd'])
+    subprocess.run(['systemctl', 'stop', 'dnsmasq']) 
+    subprocess.run(['systemctl', 'disable', 'hostapd'])
+    subprocess.run(['systemctl', 'disable', 'dnsmasq'])
     
     # Reset network interface
-    os.system('ip addr flush dev wlan0')
-    os.system('ip link set wlan0 down')
-    os.system('ip link set wlan0 up')
+    subprocess.run(['ip', 'addr', 'flush', 'dev', 'wlan0'])
+    subprocess.run(['ip', 'link', 'set', 'wlan0', 'down'])
+    subprocess.run(['ip', 'link', 'set', 'wlan0', 'up'])
     
     # Stop any existing wpa_supplicant processes
-    os.system('killall wpa_supplicant 2>/dev/null')
-    os.system('systemctl stop wpa_supplicant 2>/dev/null')
+    subprocess.run(['killall', 'wpa_supplicant'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['systemctl', 'stop', 'wpa_supplicant'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     # Configure dhcpcd for client mode
     log_status("Configuring dhcpcd for client mode...")
-    os.system('cp /etc/dhcpcd.conf.original /etc/dhcpcd.conf 2>/dev/null || echo "# dhcpcd config for client mode" > /etc/dhcpcd.conf')
-    os.system('systemctl restart dhcpcd')
+    subprocess.run('cp /etc/dhcpcd.conf.original /etc/dhcpcd.conf 2>/dev/null || echo "# dhcpcd config for client mode" > /etc/dhcpcd.conf', shell=True)
+    subprocess.run(['systemctl', 'restart', 'dhcpcd'])
     
     # Start NetworkManager first and let it handle the connection
     log_status("Starting NetworkManager to handle WiFi connection...")
-    os.system('systemctl unmask NetworkManager')
-    os.system('systemctl enable NetworkManager') 
-    os.system('systemctl restart NetworkManager')
+    subprocess.run(['systemctl', 'unmask', 'NetworkManager'])
+    subprocess.run(['systemctl', 'enable', 'NetworkManager']) 
+    subprocess.run(['systemctl', 'restart', 'NetworkManager'])
     
     # Wait for NetworkManager to start
     time.sleep(5)
     
-    nm_running = os.system('systemctl is-active NetworkManager > /dev/null') == 0
+    nm_running = subprocess.run(['systemctl', 'is-active', 'NetworkManager'], capture_output=True).returncode == 0
     log_status(f"NetworkManager status: {'running' if nm_running else 'failed'}")
     
     if nm_running:
@@ -425,7 +425,7 @@ def transition_to_client_mode_with_status(ssid):
             log_status("NetworkManager connection successful!")
             time.sleep(3)
             # Check if we got IP
-            ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+            ip_result = subprocess.run('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1"', shell=True, capture_output=True).returncode
             if ip_result == 0:
                 log_status("IP address obtained via NetworkManager!")
                 update_connection_status({
@@ -444,7 +444,7 @@ def transition_to_client_mode_with_status(ssid):
                 if result.returncode == 0:
                     log_status("Connection profile method successful!")
                     time.sleep(3)
-                    ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+                    ip_result = subprocess.run('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1"', shell=True, capture_output=True).returncode
                     if ip_result == 0:
                         log_status("IP address obtained via connection profile!")
                         update_connection_status({
@@ -463,21 +463,21 @@ def transition_to_client_mode_with_status(ssid):
     log_status("NetworkManager connection failed, trying wpa_supplicant fallback...")
     
     # Stop NetworkManager to avoid conflicts
-    os.system('systemctl stop NetworkManager')
+    subprocess.run(['systemctl', 'stop', 'NetworkManager'])
     
     # Start wpa_supplicant manually with specific config
     log_status("Starting wpa_supplicant manually...")
     wpa_cmd = 'wpa_supplicant -B -i wlan0 -D nl80211,wext -c /etc/wpa_supplicant/wpa_supplicant.conf'
-    wpa_result = os.system(wpa_cmd)
+    wpa_result = subprocess.run(wpa_cmd, shell=True).returncode
     
     if wpa_result == 0:
         time.sleep(3)
-        wpa_running = os.system('pgrep wpa_supplicant > /dev/null') == 0
+        wpa_running = subprocess.run(['pgrep', 'wpa_supplicant'], capture_output=True).returncode == 0
         
         if wpa_running:
             log_status("wpa_supplicant started successfully, triggering connection...")
-            os.system('wpa_cli -i wlan0 reconfigure')
-            os.system('wpa_cli -i wlan0 reassociate')
+            subprocess.run(['wpa_cli', '-i', 'wlan0', 'reconfigure'])
+            subprocess.run(['wpa_cli', '-i', 'wlan0', 'reassociate'])
             
             update_connection_status({
                 'state': 'connecting',
@@ -493,22 +493,22 @@ def transition_to_client_mode_with_status(ssid):
                 time.sleep(3)
                 
                 # Check if we have an IP address
-                ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+                ip_result = subprocess.run('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1"', shell=True, capture_output=True).returncode
                 if ip_result == 0:
                     log_status("Connection successful - IP address obtained!")
                     connected = True
                     break
                 
                 # Check wpa_supplicant status
-                wpa_status = os.system('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED" > /dev/null')
+                wpa_status = subprocess.run('wpa_cli -i wlan0 status | grep "wpa_state=COMPLETED"', shell=True, capture_output=True).returncode
                 if wpa_status == 0:
                     log_status("wpa_supplicant connected, requesting IP...")
-                    os.system('dhclient wlan0 2>/dev/null')
+                    subprocess.run(['dhclient', 'wlan0'], stderr=subprocess.DEVNULL)
                     time.sleep(2)
                     continue
                 
                 log_status(f"Connection attempt {attempt + 1}/{max_attempts}...")
-                os.system('wpa_cli -i wlan0 reassociate')
+                subprocess.run(['wpa_cli', '-i', 'wlan0', 'reassociate'])
             
             if connected:
                 update_connection_status({
@@ -536,10 +536,10 @@ def final_check():
     log_status("Performing final connectivity check...")
     
     # Check if we have an IP address
-    ip_result = os.system('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1" > /dev/null')
+    ip_result = subprocess.run('ip addr show wlan0 | grep "inet " | grep -v "127.0.0.1"', shell=True, capture_output=True).returncode
     if ip_result == 0:
         # Check internet connectivity
-        ping_result = os.system('ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1')
+        ping_result = subprocess.run(['ping', '-c', '1', '-W', '5', '8.8.8.8'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
         if ping_result == 0:
             log_status("Final check: Full internet connectivity confirmed")
         else:
@@ -659,7 +659,7 @@ def create_networkmanager_connection(ssid, wifi_key):
     
     try:
         # Create system-connections directory if it doesn't exist
-        os.system('mkdir -p /etc/NetworkManager/system-connections')
+        os.makedirs('/etc/NetworkManager/system-connections', exist_ok=True)
         
         # Generate a unique UUID for this connection
         connection_uuid = str(uuid.uuid4())
@@ -735,7 +735,7 @@ def cleanup_old_network_connections():
     """
     try:
         # Get list of NetworkManager connections
-        result = os.popen('nmcli -t -f NAME connection show 2>/dev/null').read()
+        result = subprocess.run(['nmcli', '-t', '-f', 'NAME', 'connection', 'show'], capture_output=True, text=True, stderr=subprocess.DEVNULL).stdout
         connections = [line.strip() for line in result.split('\n') if line.strip()]
         
         # Remove old WiFi connections but keep the one we just created
