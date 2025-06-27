@@ -42,19 +42,6 @@ def save_credentials():
     print(f"SSID bytes: {ssid.encode('utf-8')}")
     print(f"SSID repr: {repr(ssid)}")
     
-    # Normalize SSID using centralized function
-    normalized_ssid = normalize_ssid(ssid)
-    
-    if normalized_ssid != ssid:
-        print(f"Normalized SSID: '{normalized_ssid}'")
-    
-    # Use normalized SSID for all operations
-    ssid = normalized_ssid
-    
-    # Store normalized credentials globally for transition function
-    current_wifi_credentials['ssid'] = ssid
-    current_wifi_credentials['key'] = wifi_key
-
     # Create wpa_supplicant.conf
     create_wpa_supplicant(ssid, wifi_key)
     
@@ -101,28 +88,6 @@ def save_wpa_credentials():
 
 ######## FUNCTIONS ##########
 
-def normalize_ssid(ssid):
-    """
-    Normalize SSID by converting Unicode smart quotes and special characters 
-    to standard ASCII equivalents for better compatibility
-    """
-    if not ssid:
-        return ssid
-        
-    normalized = ssid
-    # Replace smart quotes with regular quotes
-    normalized = normalized.replace('\u2019', "'")  # Right single quotation mark
-    normalized = normalized.replace('\u2018', "'")  # Left single quotation mark
-    normalized = normalized.replace('\u201c', '"')  # Left double quotation mark
-    normalized = normalized.replace('\u201d', '"')  # Right double quotation mark
-    # Replace em dash and en dash with regular hyphen
-    normalized = normalized.replace('\u2014', '-')  # Em dash
-    normalized = normalized.replace('\u2013', '-')  # En dash
-    # Replace non-breaking space with regular space
-    normalized = normalized.replace('\u00a0', ' ')  # Non-breaking space
-    
-    return normalized
-
 def scan_wifi_networks():
     iwlist_raw = subprocess.Popen(['iwlist', 'scan'], stdout=subprocess.PIPE)
     ap_list, err = iwlist_raw.communicate()
@@ -136,16 +101,11 @@ def scan_wifi_networks():
                 # Remove surrounding quotes if present
                 ap_ssid = essid_part.strip('"')
                 if ap_ssid:
-                    # Normalize the SSID for consistency
-                    ap_ssid = normalize_ssid(ap_ssid)
                     ap_array.append(ap_ssid)
 
     return ap_array
 
 def create_wpa_supplicant(ssid, wifi_key):
-    # Ensure SSID is normalized (defensive programming)
-    ssid = normalize_ssid(ssid)
-    
     # Use /tmp directory for temporary file to ensure write permissions
     temp_file_path = '/tmp/wpa_supplicant.conf.tmp'
     
@@ -345,9 +305,6 @@ def ensure_ap_mode_ip():
 def transition_to_client_mode_with_status(ssid):
     """Transition to client mode"""
     
-    # Ensure SSID is normalized (defensive programming)
-    ssid = normalize_ssid(ssid)
-    
     # Stop AP mode services
     subprocess.run(['systemctl', 'stop', 'hostapd'])
     subprocess.run(['systemctl', 'stop', 'dnsmasq']) 
@@ -395,13 +352,14 @@ def transition_to_client_mode_with_status(ssid):
         wifi_key = current_wifi_credentials.get('key', '')
         
         # Use subprocess for better shell escaping instead of os.system
+        quoted_ssid = f'"{ssid}"'
         try:
             # Try with password if available
             if wifi_key and wifi_key.strip():
-                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', wifi_key]
+                cmd = ['nmcli', 'device', 'wifi', 'connect', quoted_ssid, 'password', wifi_key]
                 log_status("Connecting with password...")
             else:
-                cmd = ['nmcli', 'device', 'wifi', 'connect', ssid]
+                cmd = ['nmcli', 'device', 'wifi', 'connect', quoted_ssid]
                 log_status("Connecting without password (open network)...")
                 
             log_status(f"Running command: {' '.join(['nmcli', 'device', 'wifi', 'connect', repr(ssid), '...'])}")
@@ -653,9 +611,6 @@ def create_networkmanager_connection(ssid, wifi_key):
     """
     import uuid
     import secrets
-    
-    # Ensure SSID is normalized (defensive programming)
-    ssid = normalize_ssid(ssid)
     
     try:
         # Create system-connections directory if it doesn't exist
